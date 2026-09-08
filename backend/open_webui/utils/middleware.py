@@ -38,6 +38,7 @@ from open_webui.env import (
     ENABLE_QUERIES_CACHE,
     ENABLE_REALTIME_CHAT_SAVE,
     ENABLE_RESPONSES_API_STATEFUL,
+    ENABLE_SUB2API_KEY_LOGIN,
     GLOBAL_LOG_LEVEL,
     RAG_SYSTEM_CONTEXT,
 )
@@ -2684,9 +2685,19 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 'features.image_generation',
                 await Config.get('user.permissions'),
             ):
-                # Skip forced image generation when native FC is enabled - model can use generate_image tool
-                if metadata.get('params', {}).get('function_calling') == 'legacy':
+                # A Sub2API key session is an OpenAI-compatible proxy.  Its chat model may
+                # decline a native tool call even after the user explicitly selected the
+                # image button, which leaves the user with a text-only answer.  Treat the
+                # button as an explicit image-generation request and call the image endpoint
+                # directly.  The normal native-tool behaviour remains unchanged elsewhere.
+                if (
+                    metadata.get('params', {}).get('function_calling') == 'legacy'
+                    or ENABLE_SUB2API_KEY_LOGIN
+                ):
                     form_data = await chat_image_generation_handler(request, form_data, extra_params, user)
+                    # The image is already generated above. Do not also expose generate_image
+                    # as a native tool to the chat model, which could create a duplicate image.
+                    features['image_generation'] = False
 
         if 'code_interpreter' in features and features['code_interpreter']:
             engine = await Config.get('code_interpreter.engine', 'pyodide')
