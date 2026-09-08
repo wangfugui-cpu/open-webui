@@ -21,7 +21,7 @@
 	<section class="rounded-[2rem] p-2 sm:p-8">
 		<div class="flex items-center gap-4">
 			<img
-				src="{WEBUI_BASE_URL}/static/assets/yanchuan-mark.png"
+				src="{WEBUI_BASE_URL}/assets/yanchuan-mark.png"
 				class="size-16 rounded-2xl shadow-sm"
 				alt="言川 AI 标志"
 			/>
