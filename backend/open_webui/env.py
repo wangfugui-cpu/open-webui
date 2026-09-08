@@ -846,6 +846,12 @@ BYPASS_PYDUB_PREPROCESSING = os.getenv('BYPASS_PYDUB_PREPROCESSING', 'False').lo
 # compatible APIs for endpoints not natively handled by Open WebUI.
 ENABLE_OPENAI_API_PASSTHROUGH = os.getenv('ENABLE_OPENAI_API_PASSTHROUGH', 'False').lower() == 'true'
 
+# Personal Sub2API integration. The browser sends a key only to this Open WebUI
+# server; the server validates it against the configured internal Sub2API URL
+# and stores it encrypted for subsequent per-user model requests.
+ENABLE_SUB2API_KEY_LOGIN = os.getenv('ENABLE_SUB2API_KEY_LOGIN', 'False').lower() == 'true'
+SUB2API_KEY_LOGIN_BASE_URL = os.getenv('SUB2API_KEY_LOGIN_BASE_URL', '').rstrip('/')
+
 WEBUI_AUTH_SIGNOUT_REDIRECT_URL = os.getenv('WEBUI_AUTH_SIGNOUT_REDIRECT_URL', None)
 
 ####################################

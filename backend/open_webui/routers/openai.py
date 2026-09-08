@@ -28,9 +28,11 @@ from open_webui.env import (
     BYPASS_MODEL_ACCESS_CONTROL,
     ENABLE_FORWARD_USER_INFO_HEADERS,
     ENABLE_OPENAI_API_PASSTHROUGH,
+    ENABLE_SUB2API_KEY_LOGIN,
     FORWARD_SESSION_INFO_HEADER_CHAT_ID,
     MODELS_CACHE_TTL,
     REDIS_KEY_PREFIX,
+    SUB2API_KEY_LOGIN_BASE_URL,
 )
 from open_webui.events import EVENTS, publish_event, publish_model_provider_request_failed
 from open_webui.internal.db import get_async_session
@@ -38,6 +40,7 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.models.config import Config
 from open_webui.models.groups import Groups
 from open_webui.models.models import Models
+from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.users import UserModel
 from open_webui.utils.access_control import check_model_access, has_connection_access, has_permission
 from open_webui.utils.anthropic import ANTHROPIC_VERSION, get_anthropic_models, is_anthropic_url
@@ -78,6 +81,8 @@ _STRIP_PROXY_HEADERS = frozenset({'Content-Encoding', 'Content-Length', 'Transfe
 _MODEL_LIST_TIMEOUT = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
 _UNSUPPORTED_OPENAI_MODEL_KEYWORDS = ('babbage', 'dall-e', 'davinci', 'embedding', 'tts', 'whisper')
 BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
+SUB2API_KEY_SESSION_PROVIDER = 'sub2api_api_key'
+SUB2API_OAUTH_METADATA_KEY = 'sub2api'
 
 
 def _clean_proxy_headers(raw_headers) -> dict:
@@ -94,7 +99,7 @@ async def send_get_request(
 ):
     try:
         async with aiohttp.ClientSession(timeout=_MODEL_LIST_TIMEOUT, trust_env=True) as session:
-            if request and config:
+            if request is not None and config is not None:
                 headers, cookies = await get_headers_and_cookies(request, url, key, config, user=user)
             else:
                 headers = {
@@ -112,6 +117,8 @@ async def send_get_request(
                 ssl=AIOHTTP_CLIENT_SESSION_SSL,
             ) as response:
                 return await response.json(loads=JSONCodec.loads)
+    except HTTPException:
+        raise
     except Exception as e:
         # Handle connection error here
         log.error(f'Connection error: {e}')
@@ -159,6 +166,7 @@ async def get_headers_and_cookies(
     metadata: dict | None = None,
     user: UserModel = None,
 ):
+    key = await get_effective_openai_api_key(url, key, user)
     cookies = {}
     headers = {
         'Content-Type': 'application/json',
@@ -218,6 +226,37 @@ async def get_headers_and_cookies(
         headers.update(custom_headers)
 
     return headers, cookies
+
+
+def is_sub2api_key_login_connection(url: str | None) -> bool:
+    return bool(
+        ENABLE_SUB2API_KEY_LOGIN
+        and SUB2API_KEY_LOGIN_BASE_URL
+        and url
+        and url.rstrip('/') == f'{SUB2API_KEY_LOGIN_BASE_URL}/v1'
+    )
+
+
+def is_sub2api_key_login_user(user: UserModel | None) -> bool:
+    if not user or not isinstance(user.oauth, dict):
+        return False
+    metadata = user.oauth.get(SUB2API_OAUTH_METADATA_KEY)
+    return isinstance(metadata, dict) and isinstance(metadata.get('subject'), str)
+
+
+async def get_effective_openai_api_key(url: str, configured_key: str | None, user: UserModel | None) -> str | None:
+    """Select an encrypted per-user Sub2API credential for its exact provider URL."""
+    if not is_sub2api_key_login_connection(url) or not is_sub2api_key_login_user(user):
+        return configured_key
+
+    session = await OAuthSessions.get_session_by_provider_and_user_id(SUB2API_KEY_SESSION_PROVIDER, user.id)
+    token = session.token if session else None
+    api_key = token.get('access_token') if isinstance(token, dict) else None
+    if not isinstance(api_key, str) or not api_key:
+        # Do not silently fall back to the service-wide key: that would charge
+        # the administrator's account when a member's credential is missing.
+        raise HTTPException(status_code=401, detail='Your Sub2API key connection has expired. Please sign in again.')
+    return api_key
 
 
 def get_microsoft_entra_id_access_token():
@@ -468,10 +507,7 @@ async def get_anthropic_request_target(request: Request, form_data: dict, user: 
         model_id = model_info.base_model_id
         payload['model'] = model_id
 
-    models = request.app.state.OPENAI_MODELS
-    if not models or model_id not in models:
-        await get_all_models(request, user=user)
-        models = request.app.state.OPENAI_MODELS
+    models = await get_openai_models_by_id(request, user)
 
     model = models.get(model_id)
     if not model or 'urlIdx' not in model:
@@ -688,38 +724,37 @@ async def get_all_models_responses(request: Request, user: UserModel) -> list:
 
     request_tasks = []
     for idx, url in enumerate(api_base_urls):
-        if (str(idx) not in api_configs) and (url not in api_configs):  # Legacy support
-            request_tasks.append(get_models_request(request, url, api_keys[idx], user=user))
-        else:
-            api_config = api_configs.get(
-                str(idx),
-                api_configs.get(url, {}),  # Legacy support
-            )
+        api_config = api_configs.get(
+            str(idx),
+            api_configs.get(url, {}),  # Legacy support
+        )
 
-            enable = api_config.get('enable', True)
-            model_ids = api_config.get('model_ids', [])
+        enable = api_config.get('enable', True)
+        model_ids = api_config.get('model_ids', [])
 
-            if enable:
-                if len(model_ids) == 0:
-                    request_tasks.append(get_models_request(request, url, api_keys[idx], user=user, config=api_config))
-                else:
-                    model_list = {
-                        'object': 'list',
-                        'data': [
-                            {
-                                'id': model_id,
-                                'name': model_id,
-                                'owned_by': 'openai',
-                                'openai': {'id': model_id},
-                                'urlIdx': idx,
-                            }
-                            for model_id in model_ids
-                        ],
-                    }
-
-                    request_tasks.append(asyncio.ensure_future(asyncio.sleep(0, model_list)))
+        if enable:
+            if len(model_ids) == 0:
+                # Passing an empty config is deliberate: it lets the common
+                # header builder select the current user's Sub2API key.
+                request_tasks.append(get_models_request(request, url, api_keys[idx], user=user, config=api_config))
             else:
-                request_tasks.append(asyncio.ensure_future(asyncio.sleep(0, None)))
+                model_list = {
+                    'object': 'list',
+                    'data': [
+                        {
+                            'id': model_id,
+                            'name': model_id,
+                            'owned_by': 'openai',
+                            'openai': {'id': model_id},
+                            'urlIdx': idx,
+                        }
+                        for model_id in model_ids
+                    ],
+                }
+
+                request_tasks.append(asyncio.ensure_future(asyncio.sleep(0, model_list)))
+        else:
+            request_tasks.append(asyncio.ensure_future(asyncio.sleep(0, None)))
 
     responses = await asyncio.gather(*request_tasks)
 
@@ -861,6 +896,22 @@ async def get_all_models(request: Request, user: UserModel) -> dict[str, list]:
 
     request.app.state.OPENAI_MODELS = models
     return {'data': list(models.values())}
+
+
+async def get_openai_models_by_id(request: Request, user: UserModel) -> dict[str, dict]:
+    """Return the authenticated user's provider model map.
+
+    ``OPENAI_MODELS`` is a process-wide cache maintained for compatibility,
+    but a Sub2API key can expose a different model set per user. Routing a
+    request from that shared map would allow one user's discovery result to be
+    used by another, so request paths use this user-scoped cached result.
+    """
+    response = await get_all_models(request, user=user)
+    return {
+        model['id']: model
+        for model in response.get('data', [])
+        if isinstance(model, dict) and isinstance(model.get('id'), str)
+    }
 
 
 @router.get('/models')
@@ -1514,11 +1565,7 @@ async def generate_chat_completion(
     else:
         await check_model_access(user, None, bypass_filter)
 
-    # Check if model is already in app state cache to avoid expensive get_all_models() call
-    models = request.app.state.OPENAI_MODELS
-    if not models or model_id not in models:
-        await get_all_models(request, user=user)
-        models = request.app.state.OPENAI_MODELS
+    models = await get_openai_models_by_id(request, user)
     model = models.get(model_id)
 
     if model:
@@ -1735,11 +1782,7 @@ async def embeddings(request: Request, form_data: dict, user):
     body = JSONCodec.dumps(form_data)
     # Find correct backend url/key based on model
     model_id = form_data.get('model')
-    # Check if model is already in app state cache to avoid expensive get_all_models() call
-    models = request.app.state.OPENAI_MODELS
-    if not models or model_id not in models:
-        await get_all_models(request, user=user)
-        models = request.app.state.OPENAI_MODELS
+    models = await get_openai_models_by_id(request, user)
     if model_id in models:
         idx = models[model_id]['urlIdx']
 
@@ -1864,10 +1907,7 @@ async def responses(
     await check_model_access(user, await Models.get_model_by_id(model_id), BYPASS_MODEL_ACCESS_CONTROL)
 
     if model_id:
-        models = request.app.state.OPENAI_MODELS
-        if not models or model_id not in models:
-            await get_all_models(request, user=user)
-            models = request.app.state.OPENAI_MODELS
+        models = await get_openai_models_by_id(request, user)
         if model_id in models:
             idx = models[model_id]['urlIdx']
 
@@ -1982,10 +2022,7 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
     idx = 0
     model_id = payload.get('model') if isinstance(payload, dict) else None
     if model_id:
-        models = request.app.state.OPENAI_MODELS
-        if not models or model_id not in models:
-            await get_all_models(request, user=user)
-            models = request.app.state.OPENAI_MODELS
+        models = await get_openai_models_by_id(request, user)
         if model_id in models:
             idx = models[model_id]['urlIdx']
 

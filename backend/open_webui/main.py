@@ -96,6 +96,7 @@ from open_webui.env import (
     ENABLE_SCIM,
     ENABLE_SIGNUP_PASSWORD_CONFIRMATION,
     ENABLE_STAR_SESSIONS_MIDDLEWARE,
+    ENABLE_SUB2API_KEY_LOGIN,
     ENABLE_VERSION_UPDATE_CHECK,
     ENABLE_WEBSOCKET_SUPPORT,
     EXTERNAL_PWA_MANIFEST_URL,
@@ -2006,10 +2007,7 @@ async def generate_messages(
         model_id = model_info.base_model_id
 
     passthrough_params = []
-    models = request.app.state.OPENAI_MODELS
-    if not models or model_id not in models:
-        await openai.get_all_models(request, user=user)
-        models = request.app.state.OPENAI_MODELS
+    models = await openai.get_openai_models_by_id(request, user)
     model = models.get(model_id)
     if model:
         url, _, api_config = await openai.get_openai_connection(model['urlIdx'])
@@ -2301,6 +2299,7 @@ async def get_app_config(request: Request):
             'enable_ldap': config.get('ldap.enable'),
             'enable_signup': config.get('ui.enable_signup'),
             'enable_login_form': config.get('ui.enable_login_form'),
+            'enable_sub2api_key_login': ENABLE_SUB2API_KEY_LOGIN,
             'enable_websocket': ENABLE_WEBSOCKET_SUPPORT,
             **(
                 {'websocket_heartbeat_interval': WEBSOCKET_HEARTBEAT_INTERVAL}

@@ -12,6 +12,7 @@
 	import {
 		ldapUserSignIn,
 		getSessionUser,
+		sub2apiKeyUserSignIn,
 		userSignIn,
 		userSignUp,
 		updateUserTimezone
@@ -41,6 +42,7 @@
 	let confirmPassword = '';
 
 	let ldapUsername = '';
+	let sub2apiApiKey = '';
 
 	let submitting = false;
 
@@ -105,6 +107,20 @@
 		await setSessionUser(sessionUser);
 	};
 
+	const sub2apiKeySignInHandler = async () => {
+		try {
+			const sessionUser = await sub2apiKeyUserSignIn(sub2apiApiKey).catch((error) => {
+				toast.error(`${error}`);
+				return null;
+			});
+			await setSessionUser(sessionUser);
+		} finally {
+			// Keep the credential only for the form submission; it must not live in
+			// browser storage or survive a navigation.
+			sub2apiApiKey = '';
+		}
+	};
+
 	const submitHandler = async () => {
 		if (submitting) {
 			return;
@@ -114,6 +130,8 @@
 		try {
 			if (mode === 'ldap') {
 				await ldapSignInHandler();
+			} else if (mode === 'sub2api') {
+				await sub2apiKeySignInHandler();
 			} else if (mode === 'signin') {
 				await signInHandler();
 			} else {
@@ -278,6 +296,10 @@
 											{$i18n.t(`Sign in to {{WEBUI_NAME}} with LDAP`, { WEBUI_NAME: $WEBUI_NAME })}
 										{:else if mode === 'signin'}
 											{$i18n.t(`Sign in to {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
+										{:else if mode === 'sub2api'}
+											{$i18n.t(`Sign in to {{WEBUI_NAME}} with a Sub2API key`, {
+												WEBUI_NAME: $WEBUI_NAME
+											})}
 										{:else}
 											{$i18n.t(`Sign up to {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
 										{/if}
@@ -293,7 +315,7 @@
 									{/if}
 								</div>
 
-								{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
+								{#if $config?.features.enable_login_form || $config?.features.enable_ldap || $config?.features.enable_sub2api_key_login || form}
 									<div class="flex flex-col mt-4">
 										{#if mode === 'signup'}
 											<div class="mb-2">
@@ -328,6 +350,30 @@
 													required
 												/>
 											</div>
+										{:else if mode === 'sub2api'}
+											<div class="mb-2">
+												<label
+													for="sub2api-api-key"
+													class="text-sm font-normal text-left mb-1 block"
+													>{$i18n.t('Sub2API API Key')}</label
+												>
+												<SensitiveInput
+													bind:value={sub2apiApiKey}
+													type="password"
+													id="sub2api-api-key"
+													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													placeholder={$i18n.t('Paste your Sub2API API key')}
+													autocomplete="off"
+													name="sub2api-api-key"
+													screenReader={true}
+													required
+												/>
+												<div class="mt-1 text-xs text-left text-gray-500 dark:text-gray-400">
+													{$i18n.t(
+														'The key is sent only to this server and stored encrypted for your model requests.'
+													)}
+												</div>
+											</div>
 										{:else}
 											<div class="mb-2">
 												<label for="email" class="text-sm font-normal text-left mb-1 block"
@@ -346,47 +392,49 @@
 											</div>
 										{/if}
 
-										<div>
-											<label for="password" class="text-sm font-normal text-left mb-1 block"
-												>{$i18n.t('Password')}</label
-											>
-											<SensitiveInput
-												bind:value={password}
-												type="password"
-												id="password"
-												class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
-												placeholder={$i18n.t('Enter Your Password')}
-												autocomplete={mode === 'signup' ? 'new-password' : 'current-password'}
-												name="password"
-												screenReader={true}
-												required
-												aria-required="true"
-											/>
-										</div>
-
-										{#if mode === 'signup' && $config?.features?.enable_signup_password_confirmation}
-											<div class="mt-2">
-												<label
-													for="confirm-password"
-													class="text-sm font-normal text-left mb-1 block"
-													>{$i18n.t('Confirm Password')}</label
+										{#if mode !== 'sub2api'}
+											<div>
+												<label for="password" class="text-sm font-normal text-left mb-1 block"
+													>{$i18n.t('Password')}</label
 												>
 												<SensitiveInput
-													bind:value={confirmPassword}
+													bind:value={password}
 													type="password"
-													id="confirm-password"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent"
-													placeholder={$i18n.t('Confirm Your Password')}
-													autocomplete="new-password"
-													name="confirm-password"
+													id="password"
+													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													placeholder={$i18n.t('Enter Your Password')}
+													autocomplete={mode === 'signup' ? 'new-password' : 'current-password'}
+													name="password"
+													screenReader={true}
 													required
+													aria-required="true"
 												/>
 											</div>
+
+											{#if mode === 'signup' && $config?.features?.enable_signup_password_confirmation}
+												<div class="mt-2">
+													<label
+														for="confirm-password"
+														class="text-sm font-normal text-left mb-1 block"
+														>{$i18n.t('Confirm Password')}</label
+													>
+													<SensitiveInput
+														bind:value={confirmPassword}
+														type="password"
+														id="confirm-password"
+														class="my-0.5 w-full text-sm outline-hidden bg-transparent"
+														placeholder={$i18n.t('Confirm Your Password')}
+														autocomplete="new-password"
+														name="confirm-password"
+														required
+													/>
+												</div>
+											{/if}
 										{/if}
 									</div>
 								{/if}
 								<div class="mt-5">
-									{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
+									{#if $config?.features.enable_login_form || $config?.features.enable_ldap || $config?.features.enable_sub2api_key_login || form}
 										{#if mode === 'ldap'}
 											<button
 												class="bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-sm py-2.5 disabled:opacity-50 flex justify-center"
@@ -410,9 +458,11 @@
 												<div class="self-center">
 													{mode === 'signin'
 														? $i18n.t('Sign in')
-														: ($config?.onboarding ?? false)
-															? $i18n.t('Create Admin Account')
-															: $i18n.t('Create Account')}
+														: mode === 'sub2api'
+															? $i18n.t('Sign in with Sub2API key')
+															: ($config?.onboarding ?? false)
+																? $i18n.t('Create Admin Account')
+																: $i18n.t('Create Account')}
 												</div>
 
 												{#if submitting}
@@ -422,7 +472,7 @@
 												{/if}
 											</button>
 
-											{#if $config?.features.enable_signup && !($config?.onboarding ?? false)}
+											{#if mode !== 'sub2api' && $config?.features.enable_signup && !($config?.onboarding ?? false)}
 												<div class=" mt-4 text-sm text-center">
 													{mode === 'signin'
 														? $i18n.t("Don't have an account?")
@@ -443,6 +493,32 @@
 													</button>
 												</div>
 											{/if}
+										{/if}
+
+										{#if $config?.features.enable_sub2api_key_login && !($config?.onboarding ?? false)}
+											<div class="mt-4 text-sm text-center">
+												{#if mode === 'sub2api'}
+													<button
+														class="font-normal underline"
+														type="button"
+														on:click={() => {
+															mode = 'signin';
+														}}
+													>
+														{$i18n.t('Use email and password instead')}
+													</button>
+												{:else if mode === 'signin'}
+													<button
+														class="font-normal underline"
+														type="button"
+														on:click={() => {
+															mode = 'sub2api';
+														}}
+													>
+														{$i18n.t('Sign in with a Sub2API key')}
+													</button>
+												{/if}
+											</div>
 										{/if}
 									{/if}
 								</div>

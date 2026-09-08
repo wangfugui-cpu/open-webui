@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import logging
 import re
 import time
@@ -9,7 +10,7 @@ import urllib
 import uuid
 from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS
 
-from aiohttp import BasicAuth, ClientSession
+from aiohttp import BasicAuth, ClientSession, ClientTimeout
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 from ldap3 import NONE, Connection, Server, Tls
@@ -25,9 +26,11 @@ from open_webui.env import (
     AIOHTTP_CLIENT_SESSION_SSL,
     ENABLE_INITIAL_ADMIN_SIGNUP,
     ENABLE_OAUTH_TOKEN_EXCHANGE,
+    ENABLE_SUB2API_KEY_LOGIN,
     OAUTH_TOKEN_EXCHANGE_RATE_LIMIT,
     OAUTH_TOKEN_EXCHANGE_RATE_LIMIT_WINDOW,
     OAUTH_TOKEN_EXCHANGE_TRUSTED_CLIENT_IDS,
+    SUB2API_KEY_LOGIN_BASE_URL,
     WEBUI_AUTH,
     WEBUI_AUTH_COOKIE_SAME_SITE,
     WEBUI_AUTH_COOKIE_SECURE,
@@ -89,6 +92,7 @@ log = logging.getLogger(__name__)
 # Forgive us our failed attempts, as we forgive those
 # who exceed their allotted rate against this gate.
 signin_rate_limiter = RateLimiter(redis_client=get_redis_client(), limit=5 * 3, window=60 * 3)
+sub2api_signin_rate_limiter = RateLimiter(redis_client=get_redis_client(), limit=10, window=60 * 3)
 # Best-effort throttle only: there is no caller identity before the provider answers,
 # and deployments may derive request.client from proxy headers.
 token_exchange_rate_limiter = (
@@ -243,6 +247,10 @@ class SessionUserInfoResponse(SessionUserResponse, UserStatus):
     bio: str | None = None
     gender: str | None = None
     date_of_birth: datetime.date | None = None
+
+
+class Sub2APIKeySigninForm(BaseModel):
+    api_key: str
 
 
 @router.get('/', response_model=SessionUserInfoResponse)
@@ -830,6 +838,166 @@ async def signin(
         return await create_session_response(request, user, db, response, set_cookie=True, source=auth_source)
     else:
         raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
+
+
+SUB2API_KEY_SESSION_PROVIDER = 'sub2api_api_key'
+SUB2API_KEY_SESSION_LIFETIME_SECONDS = 10 * 365 * 24 * 60 * 60
+SUB2API_OAUTH_METADATA_KEY = 'sub2api'
+
+
+async def fetch_sub2api_identity(api_key: str) -> tuple[str, str]:
+    """Validate an API key server-side and return its stable Sub2API identity."""
+    if not SUB2API_KEY_LOGIN_BASE_URL:
+        raise HTTPException(status_code=503, detail='Sub2API key login is not configured')
+
+    identity_url = f'{SUB2API_KEY_LOGIN_BASE_URL}/v1/sub2api/identity'
+    try:
+        async with ClientSession(
+            timeout=ClientTimeout(total=10),
+            trust_env=True,
+        ) as session:
+            async with session.get(
+                identity_url,
+                headers={
+                    'Authorization': f'Bearer {api_key}',
+                    'Cache-Control': 'no-store',
+                },
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                allow_redirects=False,
+            ) as provider_response:
+                if provider_response.status in (401, 403, 429):
+                    raise HTTPException(status_code=400, detail=ERROR_MESSAGES.INVALID_CRED)
+                if provider_response.status != 200:
+                    log.warning('Sub2API identity verification returned status %s', provider_response.status)
+                    raise HTTPException(status_code=503, detail='Sub2API identity verification is unavailable')
+                payload = await provider_response.json()
+    except HTTPException:
+        raise
+    except Exception as err:
+        log.warning('Sub2API identity verification failed: %s', type(err).__name__)
+        raise HTTPException(status_code=503, detail='Sub2API identity verification is unavailable') from err
+
+    identity = payload.get('user') if isinstance(payload, dict) else None
+    raw_user_id = identity.get('id') if isinstance(identity, dict) else None
+    user_id = str(raw_user_id).strip()
+    if not re.fullmatch(r'\d{1,19}', user_id):
+        log.warning('Sub2API identity verification returned an invalid subject')
+        raise HTTPException(status_code=503, detail='Sub2API identity verification is unavailable')
+
+    raw_name = identity.get('name') if isinstance(identity, dict) else None
+    name = str(raw_name).strip()[:100] if raw_name is not None else ''
+    return user_id, name or f'Sub2API User {user_id}'
+
+
+async def create_sub2api_key_user(
+    request: Request,
+    *,
+    email: str,
+    name: str,
+    subject: str,
+    db: AsyncSession,
+) -> UserModel:
+    """Create a regular account for a verified Sub2API identity.
+
+    The first API-key holder is never promoted to administrator: initial
+    administration remains an explicit local setup decision.
+    """
+    user = await Auths.insert_new_auth(
+        email=email,
+        password=await get_password_hash(str(uuid.uuid4())),
+        name=name,
+        role=await Config.get('ui.default_user_role'),
+        oauth={SUB2API_OAUTH_METADATA_KEY: {'subject': subject}},
+        db=db,
+    )
+    if not user:
+        raise HTTPException(500, detail=ERROR_MESSAGES.CREATE_USER_ERROR)
+
+    await apply_default_group_assignment(
+        await Config.get('ui.default_group_id'),
+        user.id,
+        db=db,
+    )
+    await publish_event(
+        request,
+        EVENTS.USER_CREATED,
+        actor=user,
+        subject_id=user.id,
+        source='sub2api',
+        data={'role': user.role},
+    )
+    return user
+
+
+def is_sub2api_key_user(user: UserModel, subject: str) -> bool:
+    metadata = user.oauth.get(SUB2API_OAUTH_METADATA_KEY) if isinstance(user.oauth, dict) else None
+    return isinstance(metadata, dict) and metadata.get('subject') == subject
+
+
+async def store_sub2api_key_session(user_id: str, subject: str, api_key: str, db: AsyncSession) -> None:
+    token = {
+        'access_token': api_key,
+        'subject': subject,
+        # Sub2API remains the source of truth for expiry and revocation. This
+        # value merely avoids generic OAuth cleanup removing the key early.
+        'expires_at': int(time.time()) + SUB2API_KEY_SESSION_LIFETIME_SECONDS,
+    }
+    existing = await OAuthSessions.get_session_by_provider_and_user_id(
+        SUB2API_KEY_SESSION_PROVIDER,
+        user_id,
+        db=db,
+    )
+    saved = (
+        await OAuthSessions.update_session_by_id(existing.id, token, db=db)
+        if existing
+        else await OAuthSessions.create_session(user_id, SUB2API_KEY_SESSION_PROVIDER, token, db=db)
+    )
+    if not saved:
+        raise HTTPException(500, detail='Unable to save Sub2API credentials')
+
+
+@router.post('/sub2api/signin', response_model=SessionUserResponse)
+async def signin_with_sub2api_key(
+    request: Request,
+    response: Response,
+    form_data: Sub2APIKeySigninForm,
+    db: AsyncSession = Depends(get_async_session),
+):
+    if not ENABLE_SUB2API_KEY_LOGIN:
+        raise HTTPException(status_code=404, detail='Not found')
+
+    api_key = form_data.api_key.strip()
+    if not api_key or len(api_key) > 1024:
+        raise HTTPException(status_code=400, detail=ERROR_MESSAGES.INVALID_CRED)
+
+    client_address = request.client.host if request.client else 'unknown'
+    if sub2api_signin_rate_limiter.is_limited(client_address):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=ERROR_MESSAGES.RATE_LIMIT_EXCEEDED)
+    # Keep a second throttle bucket per credential fingerprint. The raw key is
+    # neither logged nor used as a cache/rate-limit key.
+    key_fingerprint = hashlib.sha256(api_key.encode()).hexdigest()
+    if signin_rate_limiter.is_limited(f'sub2api:{key_fingerprint}'):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=ERROR_MESSAGES.RATE_LIMIT_EXCEEDED)
+
+    subject, name = await fetch_sub2api_identity(api_key)
+    email = f'sub2api-user-{subject}@users.invalid'
+    user = await Users.get_user_by_email(email, db=db)
+    if not user:
+        try:
+            user = await create_sub2api_key_user(request, email=email, name=name, subject=subject, db=db)
+        except IntegrityError:
+            # The email is derived from the verified provider subject, so a
+            # concurrent first sign-in safely converges on the same account.
+            user = await Users.get_user_by_email(email, db=db)
+            if not user:
+                raise
+    if not is_sub2api_key_user(user, subject):
+        # A normal local account must never be converted into an external-key
+        # account based on a predictable synthetic email address.
+        raise HTTPException(status_code=409, detail='Sub2API account link conflict. Ask an administrator for help.')
+
+    await store_sub2api_key_session(user.id, subject, api_key, db)
+    return await create_session_response(request, user, db, response, set_cookie=True, source='sub2api')
 
 
 ############################
