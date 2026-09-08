@@ -66,3 +66,22 @@ The paired Sub2API change adds `GET /v1/sub2api/identity`, authenticated by
 the existing API-key middleware. It returns only a stable numeric subject and
 a display name, with `Cache-Control: no-store`. It does not return the API
 key, email, balance, group, or billing data.
+
+## 言川 AI 家庭入口
+
+- 欢迎页会要求用户输入自己的 Sub2API Key，并可在首次登录时填写显示名称；该名称只保存在 Open WebUI，不会写回 Sub2API。
+- 已使用 `Sub2API User <ID>` 占位名称创建的账号，下次填写显示名称后会自动替换；已有自定义名称不会被之后的 Key 登录覆盖，仍可在“账户 → 个人资料”中修改。
+- 要让浏览器欢迎页只显示 Key 登录，设置持久化配置 `ui.enable_login_form = false`、`ui.enable_signup = false`，并保留 `ENABLE_SUB2API_KEY_LOGIN=true`。
+- 建议保留 `ENABLE_PASSWORD_AUTH=true` 作为管理员受控恢复通道；若设为 `false`，所有本地密码登录（包括管理员）都会在服务端被拒绝。
+- 默认允许同一 Key 在手机和电脑同时登录。若不同设备填入不同 Key，后一次登录会更新该用户保存的 Key，因此同一用户的设备应使用同一把有效 Key。
+
+### 家庭模型列表
+
+建议在 Sub2API 的家庭用户分组里配置 `/v1/models` 展示列表，保留：
+
+1. `gpt-5.6-sol`：日常默认
+2. `gpt-6-astra`：复杂任务
+3. `gpt-5.6-luna`：快速轻量
+4. `gpt-5.3-codex-spark`：编程
+
+分组模型列表控制的是展示；它不是上游模型调用的硬权限控制。真正的模型授权和额度仍由 Sub2API 的账户、分组及网关规则负责。

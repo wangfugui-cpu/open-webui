@@ -26,6 +26,7 @@
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import OnBoarding from '$lib/components/OnBoarding.svelte';
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
+	import YanchuanKeyLogin from '$lib/components/auth/YanchuanKeyLogin.svelte';
 	import { redirect } from '@sveltejs/kit';
 
 	const i18n = getContext('i18n');
@@ -43,8 +44,16 @@
 
 	let ldapUsername = '';
 	let sub2apiApiKey = '';
+	let sub2apiDisplayName = '';
 
 	let submitting = false;
+	let keyOnlyMode = false;
+	$: keyOnlyMode = Boolean(
+		$config?.features.enable_sub2api_key_login &&
+			!$config?.features.enable_login_form &&
+			!$config?.features.enable_ldap &&
+			!($config?.onboarding ?? false)
+	);
 
 	const setSessionUser = async (sessionUser, redirectPath: string | null = null) => {
 		if (sessionUser) {
@@ -109,7 +118,7 @@
 
 	const sub2apiKeySignInHandler = async () => {
 		try {
-			const sessionUser = await sub2apiKeyUserSignIn(sub2apiApiKey).catch((error) => {
+			const sessionUser = await sub2apiKeyUserSignIn(sub2apiApiKey, sub2apiDisplayName).catch((error) => {
 				toast.error(`${error}`);
 				return null;
 			});
@@ -118,6 +127,7 @@
 			// Keep the credential only for the form submission; it must not live in
 			// browser storage or survive a navigation.
 			sub2apiApiKey = '';
+			sub2apiDisplayName = '';
 		}
 	};
 
@@ -265,6 +275,14 @@
 						</div>
 					</div>
 				{:else}
+					{#if keyOnlyMode}
+						<YanchuanKeyLogin
+							bind:apiKey={sub2apiApiKey}
+							bind:displayName={sub2apiDisplayName}
+							{submitting}
+							on:submit={submitHandler}
+						/>
+					{:else}
 					<div class="my-auto flex flex-col justify-center items-center">
 						<div id="auth-login-card" class=" sm:max-w-md my-auto pb-10 w-full dark:text-gray-100">
 							{#if $config?.metadata?.auth_logo_position === 'center'}
@@ -690,11 +708,12 @@
 							</div>
 						{/if}
 					</div>
+					{/if}
 				{/if}
 			</div>
 		</div>
 
-		{#if !$config?.metadata?.auth_logo_position}
+		{#if !$config?.metadata?.auth_logo_position && !keyOnlyMode}
 			<div class="fixed m-10 z-50">
 				<div class="flex space-x-2">
 					<div class=" self-center">

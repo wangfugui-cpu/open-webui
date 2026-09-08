@@ -341,7 +341,7 @@ export const userSignIn = async (email: string, password: string) => {
 	return res;
 };
 
-export const sub2apiKeyUserSignIn = async (apiKey: string) => {
+export const sub2apiKeyUserSignIn = async (apiKey: string, displayName: string = '') => {
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/auths/sub2api/signin`, {
@@ -351,7 +351,8 @@ export const sub2apiKeyUserSignIn = async (apiKey: string) => {
 		},
 		credentials: 'include',
 		body: JSON.stringify({
-			api_key: apiKey
+			api_key: apiKey,
+			display_name: displayName
 		})
 	})
 		.then(async (res) => {

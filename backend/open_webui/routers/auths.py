@@ -251,6 +251,7 @@ class SessionUserInfoResponse(SessionUserResponse, UserStatus):
 
 class Sub2APIKeySigninForm(BaseModel):
     api_key: str
+    display_name: str | None = None
 
 
 @router.get('/', response_model=SessionUserInfoResponse)
@@ -934,6 +935,65 @@ def is_sub2api_key_user(user: UserModel, subject: str) -> bool:
     return isinstance(metadata, dict) and metadata.get('subject') == subject
 
 
+def normalize_sub2api_display_name(value: str | None) -> str | None:
+    """Accept a small, presentation-only name supplied during key sign-in."""
+    if value is None:
+        return None
+
+    display_name = ' '.join(value.split())
+    if not display_name:
+        return None
+    if len(display_name) > 50:
+        raise HTTPException(status_code=400, detail='Display name must be at most 50 characters')
+    return display_name
+
+
+async def get_or_create_sub2api_key_user(
+    request: Request,
+    *,
+    email: str,
+    provider_name: str,
+    requested_display_name: str | None,
+    subject: str,
+    db: AsyncSession,
+) -> UserModel:
+    user = await Users.get_user_by_email(email, db=db)
+    if user:
+        return user
+
+    try:
+        return await create_sub2api_key_user(
+            request,
+            email=email,
+            name=requested_display_name or provider_name,
+            subject=subject,
+            db=db,
+        )
+    except IntegrityError:
+        # The email is derived from the verified provider subject, so a
+        # concurrent first sign-in safely converges on the same account.
+        user = await Users.get_user_by_email(email, db=db)
+        if user:
+            return user
+        raise
+
+
+async def adopt_sub2api_display_name(
+    user: UserModel,
+    subject: str,
+    requested_display_name: str | None,
+    db: AsyncSession,
+) -> UserModel:
+    # A user who signed in before the welcome page had a name field may still
+    # carry the placeholder fallback. Let that one account adopt the requested
+    # name, but never overwrite a real profile name on later sign-ins.
+    placeholder_name = f'Sub2API User {subject}'
+    if not requested_display_name or user.name != placeholder_name:
+        return user
+
+    return await Users.update_user_by_id(user.id, {'name': requested_display_name}, db=db) or user
+
+
 async def store_sub2api_key_session(user_id: str, subject: str, api_key: str, db: AsyncSession) -> None:
     token = {
         'access_token': api_key,
@@ -979,22 +1039,23 @@ async def signin_with_sub2api_key(
     if signin_rate_limiter.is_limited(f'sub2api:{key_fingerprint}'):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=ERROR_MESSAGES.RATE_LIMIT_EXCEEDED)
 
-    subject, name = await fetch_sub2api_identity(api_key)
+    requested_display_name = normalize_sub2api_display_name(form_data.display_name)
+    subject, provider_name = await fetch_sub2api_identity(api_key)
     email = f'sub2api-user-{subject}@users.invalid'
-    user = await Users.get_user_by_email(email, db=db)
-    if not user:
-        try:
-            user = await create_sub2api_key_user(request, email=email, name=name, subject=subject, db=db)
-        except IntegrityError:
-            # The email is derived from the verified provider subject, so a
-            # concurrent first sign-in safely converges on the same account.
-            user = await Users.get_user_by_email(email, db=db)
-            if not user:
-                raise
+    user = await get_or_create_sub2api_key_user(
+        request,
+        email=email,
+        provider_name=provider_name,
+        requested_display_name=requested_display_name,
+        subject=subject,
+        db=db,
+    )
     if not is_sub2api_key_user(user, subject):
         # A normal local account must never be converted into an external-key
         # account based on a predictable synthetic email address.
         raise HTTPException(status_code=409, detail='Sub2API account link conflict. Ask an administrator for help.')
+
+    user = await adopt_sub2api_display_name(user, subject, requested_display_name, db)
 
     await store_sub2api_key_session(user.id, subject, api_key, db)
     return await create_session_response(request, user, db, response, set_cookie=True, source='sub2api')
