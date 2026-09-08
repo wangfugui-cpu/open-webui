@@ -849,7 +849,7 @@ SUB2API_OAUTH_METADATA_KEY = 'sub2api'
 async def fetch_sub2api_identity(api_key: str) -> tuple[str, str]:
     """Validate an API key server-side and return its stable Sub2API identity."""
     if not SUB2API_KEY_LOGIN_BASE_URL:
-        raise HTTPException(status_code=503, detail='Sub2API key login is not configured')
+        raise HTTPException(status_code=503, detail='言川访问密钥登录暂未配置')
 
     identity_url = f'{SUB2API_KEY_LOGIN_BASE_URL}/v1/sub2api/identity'
     try:
@@ -866,28 +866,30 @@ async def fetch_sub2api_identity(api_key: str) -> tuple[str, str]:
                 ssl=AIOHTTP_CLIENT_SESSION_SSL,
                 allow_redirects=False,
             ) as provider_response:
-                if provider_response.status in (401, 403, 429):
-                    raise HTTPException(status_code=400, detail=ERROR_MESSAGES.INVALID_CRED)
+                if provider_response.status in (401, 403):
+                    raise HTTPException(status_code=400, detail='言川访问密钥无效或已过期，请检查后重试')
+                if provider_response.status == 429:
+                    raise HTTPException(status_code=429, detail=ERROR_MESSAGES.RATE_LIMIT_EXCEEDED)
                 if provider_response.status != 200:
                     log.warning('Sub2API identity verification returned status %s', provider_response.status)
-                    raise HTTPException(status_code=503, detail='Sub2API identity verification is unavailable')
+                    raise HTTPException(status_code=503, detail='言川访问密钥验证服务暂不可用，请稍后重试')
                 payload = await provider_response.json()
     except HTTPException:
         raise
     except Exception as err:
         log.warning('Sub2API identity verification failed: %s', type(err).__name__)
-        raise HTTPException(status_code=503, detail='Sub2API identity verification is unavailable') from err
+        raise HTTPException(status_code=503, detail='言川访问密钥验证服务暂不可用，请稍后重试') from err
 
     identity = payload.get('user') if isinstance(payload, dict) else None
     raw_user_id = identity.get('id') if isinstance(identity, dict) else None
     user_id = str(raw_user_id).strip()
     if not re.fullmatch(r'\d{1,19}', user_id):
         log.warning('Sub2API identity verification returned an invalid subject')
-        raise HTTPException(status_code=503, detail='Sub2API identity verification is unavailable')
+        raise HTTPException(status_code=503, detail='言川访问密钥验证服务暂不可用，请稍后重试')
 
     raw_name = identity.get('name') if isinstance(identity, dict) else None
     name = str(raw_name).strip()[:100] if raw_name is not None else ''
-    return user_id, name or f'Sub2API User {user_id}'
+    return user_id, name or f'言川用户 {user_id}'
 
 
 async def create_sub2api_key_user(
@@ -987,11 +989,16 @@ async def adopt_sub2api_display_name(
     # A user who signed in before the welcome page had a name field may still
     # carry the placeholder fallback. Let that one account adopt the requested
     # name, but never overwrite a real profile name on later sign-ins.
-    placeholder_name = f'Sub2API User {subject}'
-    if not requested_display_name or user.name != placeholder_name:
+    legacy_placeholder_name = f'Sub2API User {subject}'
+    yanchuan_placeholder_name = f'言川用户 {subject}'
+    if user.name not in {legacy_placeholder_name, yanchuan_placeholder_name}:
         return user
 
-    return await Users.update_user_by_id(user.id, {'name': requested_display_name}, db=db) or user
+    name = requested_display_name or yanchuan_placeholder_name
+    if user.name == name:
+        return user
+
+    return await Users.update_user_by_id(user.id, {'name': name}, db=db) or user
 
 
 async def store_sub2api_key_session(user_id: str, subject: str, api_key: str, db: AsyncSession) -> None:
@@ -1028,7 +1035,7 @@ async def signin_with_sub2api_key(
 
     api_key = form_data.api_key.strip()
     if not api_key or len(api_key) > 1024:
-        raise HTTPException(status_code=400, detail=ERROR_MESSAGES.INVALID_CRED)
+        raise HTTPException(status_code=400, detail='言川访问密钥无效或已过期，请检查后重试')
 
     client_address = request.client.host if request.client else 'unknown'
     if sub2api_signin_rate_limiter.is_limited(client_address):
@@ -1053,7 +1060,7 @@ async def signin_with_sub2api_key(
     if not is_sub2api_key_user(user, subject):
         # A normal local account must never be converted into an external-key
         # account based on a predictable synthetic email address.
-        raise HTTPException(status_code=409, detail='Sub2API account link conflict. Ask an administrator for help.')
+        raise HTTPException(status_code=409, detail='言川账号关联冲突，请联系管理员处理')
 
     user = await adopt_sub2api_display_name(user, subject, requested_display_name, db)
 

@@ -186,6 +186,8 @@ RUN if [ "$USE_OLLAMA" = "true" ]; then \
 COPY --chown=$UID:$GID --from=build /app/build /app/build
 COPY --chown=$UID:$GID --from=build /app/CHANGELOG.md /app/CHANGELOG.md
 COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
+# Keep the upstream copyright, conditions, and disclaimer with the binary image.
+COPY --chown=$UID:$GID ./LICENSE ./LICENSE_NOTICE ./LICENSE_HISTORY /app/
 
 # copy backend files
 COPY --chown=$UID:$GID ./backend .

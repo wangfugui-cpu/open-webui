@@ -21,7 +21,7 @@
 	<section class="rounded-[2rem] p-2 sm:p-8">
 		<div class="flex items-center gap-4">
 			<img
-				src="{WEBUI_BASE_URL}/assets/yanchuan-mark.png"
+				src="{WEBUI_BASE_URL}/static/favicon.png"
 				class="size-16 rounded-2xl shadow-sm"
 				alt="言川 AI 标志"
 			/>
@@ -61,7 +61,7 @@
 				</div>
 			</div>
 		</div>
-		<p class="mt-8 text-xs text-slate-400 dark:text-slate-500">基于 Open WebUI 构建 · 仅供家庭成员使用</p>
+		<p class="mt-8 text-xs text-slate-400 dark:text-slate-500">言川 AI · 仅供家庭成员使用</p>
 	</section>
 
 	<section class="w-full max-w-md justify-self-center rounded-[2rem] border border-slate-200 bg-white p-7 sm:p-9 shadow-xl shadow-slate-900/5 dark:border-white/10 dark:bg-slate-950 dark:shadow-none">
