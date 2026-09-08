@@ -2830,9 +2830,19 @@ async def oauth_backchannel_logout(
     return await oauth_manager.handle_backchannel_logout(request, db=db)
 
 
-@app.get('/manifest.json')
-async def get_manifest_json():
+@app.api_route('/manifest.json', methods=['GET', 'HEAD'])
+async def get_manifest_json(request: Request):
     external_pwa_manifest_url = getattr(app.state, 'EXTERNAL_PWA_MANIFEST_URL', None)
+
+    # A manifest is requested on every page load by many browsers. Keep HEAD
+    # lightweight while still advertising the same resource and media type.
+    if request.method == 'HEAD':
+        return Response(
+            status_code=status.HTTP_200_OK,
+            media_type='application/manifest+json',
+            headers={'Cache-Control': 'no-cache'},
+        )
+
     if external_pwa_manifest_url:
         # LICENSE covers this install-time Open WebUI branding surface, including
         # names, logos, manifests, metadata, and surrounding UI.
@@ -2844,34 +2854,37 @@ async def get_manifest_json():
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
         ) as r:
             r.raise_for_status()
-            return await r.json()
+            manifest = await r.json()
     else:
         # LICENSE covers this generated Open WebUI install branding surface,
         # including names, logos, manifests, metadata, and surrounding UI.
         # Do not alter, remove, obscure, or replace it except as LICENSE permits:
         # https://docs.openwebui.com/license.
-        return {
+        manifest = {
+            'id': '/',
             'name': app.state.WEBUI_NAME,
             'short_name': app.state.WEBUI_NAME,
-            'description': f'{app.state.WEBUI_NAME} is an open, extensible, user-friendly interface for AI that adapts to your workflow.',
+            'description': f'{app.state.WEBUI_NAME}，把 AI 放进日常，也放在自己手里。',
             'start_url': '/',
+            'scope': '/',
             'display': 'standalone',
-            'background_color': '#343541',
+            'theme_color': '#0f172a',
+            'background_color': '#ffffff',
             'icons': [
                 # LICENSE covers this Open WebUI install icon.
                 # Do not alter, remove, obscure, or replace it except as LICENSE permits:
                 # https://docs.openwebui.com/license.
                 {
-                    'src': '/static/logo.png',
+                    'src': '/static/web-app-manifest-192x192.png',
                     'type': 'image/png',
-                    'sizes': '500x500',
-                    'purpose': 'any',
+                    'sizes': '192x192',
+                    'purpose': 'any maskable',
                 },
                 {
-                    'src': '/static/logo.png',
+                    'src': '/static/web-app-manifest-512x512.png',
                     'type': 'image/png',
-                    'sizes': '500x500',
-                    'purpose': 'maskable',
+                    'sizes': '512x512',
+                    'purpose': 'any maskable',
                 },
             ],
             'share_target': {
@@ -2880,6 +2893,12 @@ async def get_manifest_json():
                 'params': {'text': 'shared'},
             },
         }
+
+    return JSONResponse(
+        content=manifest,
+        media_type='application/manifest+json',
+        headers={'Cache-Control': 'no-cache'},
+    )
 
 
 @app.get('/opensearch.xml')

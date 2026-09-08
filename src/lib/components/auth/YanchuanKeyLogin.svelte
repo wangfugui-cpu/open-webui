@@ -4,6 +4,7 @@
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
+	import YanchuanInstallGuide from '$lib/components/auth/YanchuanInstallGuide.svelte';
 
 	export let apiKey = '';
 	export let displayName = '';
@@ -17,8 +18,8 @@
 	};
 </script>
 
-<div class="w-full max-w-6xl mx-auto px-3 sm:px-8 py-10 grid gap-10 lg:grid-cols-[1.12fr_0.88fr] items-center text-left">
-	<section class="rounded-[2rem] p-2 sm:p-8">
+<div class="w-full max-w-6xl mx-auto px-3 sm:px-8 py-8 sm:py-10 grid gap-6 sm:gap-10 lg:grid-cols-[1.12fr_0.88fr] items-center text-left">
+	<section class="order-2 rounded-[2rem] p-2 sm:p-8 lg:order-1">
 		<div class="flex items-center gap-4">
 			<img
 				src="{WEBUI_BASE_URL}/static/favicon.png"
@@ -62,9 +63,10 @@
 			</div>
 		</div>
 		<p class="mt-8 text-xs text-slate-400 dark:text-slate-500">言川 AI · 仅供家庭成员使用</p>
+		<YanchuanInstallGuide />
 	</section>
 
-	<section class="w-full max-w-md justify-self-center rounded-[2rem] border border-slate-200 bg-white p-7 sm:p-9 shadow-xl shadow-slate-900/5 dark:border-white/10 dark:bg-slate-950 dark:shadow-none">
+	<section class="order-1 w-full max-w-md justify-self-center rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-9 shadow-xl shadow-slate-900/5 dark:border-white/10 dark:bg-slate-950 dark:shadow-none lg:order-2">
 		<div class="mb-7">
 			<p class="text-2xl font-semibold tracking-tight text-slate-950 dark:text-white">进入言川 AI</p>
 			<p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">输入自己的言川访问密钥即可使用。首次登录可以留下一个家人容易识别的名称。</p>
