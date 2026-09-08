@@ -30,6 +30,7 @@ from open_webui.models.chats import Chats
 from open_webui.models.config import Config
 from open_webui.retrieval.web.utils import get_ssrf_safe_session, validate_url
 from open_webui.routers.files import get_file_content_by_id, upload_file_handler
+from open_webui.routers.openai import get_effective_openai_api_key
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import include_user_info_headers
@@ -373,6 +374,7 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
                 {'id': 'dall-e-3', 'name': 'DALL·E 3'},
                 {'id': 'gpt-image-1', 'name': 'GPT-IMAGE 1'},
                 {'id': 'gpt-image-1.5', 'name': 'GPT-IMAGE 1.5'},
+                {'id': 'gpt-image-2', 'name': 'GPT Image 2'},
             ]
         elif image_config.IMAGE_GENERATION_ENGINE == 'gemini':
             return [
@@ -620,8 +622,13 @@ async def image_generations(
 
     try:
         if image_config.IMAGE_GENERATION_ENGINE == 'openai':
+            api_key = await get_effective_openai_api_key(
+                image_config.IMAGES_OPENAI_API_BASE_URL,
+                image_config.IMAGES_OPENAI_API_KEY,
+                user,
+            )
             headers = {
-                'Authorization': f'Bearer {image_config.IMAGES_OPENAI_API_KEY}',
+                'Authorization': f'Bearer {api_key}',
                 'Content-Type': 'application/json',
             }
 
@@ -978,8 +985,13 @@ async def image_edits(
 
     try:
         if image_config.IMAGE_EDIT_ENGINE == 'openai':
+            api_key = await get_effective_openai_api_key(
+                image_config.IMAGES_EDIT_OPENAI_API_BASE_URL,
+                image_config.IMAGES_EDIT_OPENAI_API_KEY,
+                user,
+            )
             headers = {
-                'Authorization': f'Bearer {image_config.IMAGES_EDIT_OPENAI_API_KEY}',
+                'Authorization': f'Bearer {api_key}',
             }
 
             if ENABLE_FORWARD_USER_INFO_HEADERS:
