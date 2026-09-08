@@ -121,7 +121,11 @@
 			config.ENABLE_IMAGE_GENERATION = false;
 
 			return null;
-		} else if (config.IMAGE_GENERATION_ENGINE === 'openai' && config.IMAGES_OPENAI_API_KEY === '') {
+		} else if (
+			config.IMAGE_GENERATION_ENGINE === 'openai' &&
+			config.IMAGES_OPENAI_API_KEY === '' &&
+			!$backendConfig?.features?.enable_sub2api_key_login
+		) {
 			toast.error($i18n.t('OpenAI API Key is required.'));
 			config.ENABLE_IMAGE_GENERATION = false;
 
