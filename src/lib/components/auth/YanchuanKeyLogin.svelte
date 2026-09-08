@@ -35,14 +35,14 @@
 			把自己的 AI 账号，变成家人随手可用的助手。
 		</h1>
 		<p class="mt-5 max-w-lg text-base sm:text-lg leading-8 text-slate-600 dark:text-slate-300">
-			言川 AI 是一个简洁、安全的对话入口。每位家人用自己的 Key，模型额度和聊天记录彼此独立。
+			言川 AI 是一个简洁、安全的对话入口。每位家人用自己的言川访问密钥，模型额度和聊天记录彼此独立。
 		</p>
 
 		<div class="mt-8 grid gap-3 max-w-xl">
 			<div class="flex gap-3 rounded-2xl border border-slate-200/80 bg-white/70 p-4 dark:border-white/10 dark:bg-white/5">
 				<span class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-cyan-100 text-sm font-semibold text-cyan-700">1</span>
 				<div>
-					<p class="font-medium text-slate-900 dark:text-white">自己的 Key，自己的额度</p>
+					<p class="font-medium text-slate-900 dark:text-white">自己的访问密钥，自己的额度</p>
 					<p class="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">不共用管理员账号，费用与权限更清楚。</p>
 				</div>
 			</div>
@@ -57,7 +57,7 @@
 				<span class="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-cyan-100 text-sm font-semibold text-cyan-700">3</span>
 				<div>
 					<p class="font-medium text-slate-900 dark:text-white">电脑和手机都能继续对话</p>
-					<p class="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">同一把 Key 可在常用设备同时登录，聊天记录不会丢。</p>
+					<p class="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">同一把访问密钥可在常用设备同时登录，聊天记录不会丢。</p>
 				</div>
 			</div>
 		</div>
@@ -67,7 +67,7 @@
 	<section class="w-full max-w-md justify-self-center rounded-[2rem] border border-slate-200 bg-white p-7 sm:p-9 shadow-xl shadow-slate-900/5 dark:border-white/10 dark:bg-slate-950 dark:shadow-none">
 		<div class="mb-7">
 			<p class="text-2xl font-semibold tracking-tight text-slate-950 dark:text-white">进入言川 AI</p>
-			<p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">输入自己的 Sub2API Key 即可使用。首次登录可以留下一个家人容易识别的名称。</p>
+			<p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">输入自己的言川访问密钥即可使用。首次登录可以留下一个家人容易识别的名称。</p>
 		</div>
 		<form class="flex flex-col" on:submit={submit}>
 			<div class="mb-5">
@@ -85,13 +85,13 @@
 				/>
 			</div>
 			<div>
-				<label for="sub2api-api-key" class="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-200">Sub2API Key</label>
+				<label for="sub2api-api-key" class="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-200">言川访问密钥</label>
 				<SensitiveInput
 					bind:value={apiKey}
 					type="password"
 					id="sub2api-api-key"
 					class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm outline-hidden transition placeholder:text-slate-400 focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10 dark:border-white/10 dark:bg-white/5"
-					placeholder="粘贴你的 Key"
+					placeholder="粘贴你的言川访问密钥"
 					autocomplete="off"
 					name="sub2api-api-key"
 					screenReader={true}
@@ -106,7 +106,7 @@
 				<span>进入言川 AI</span>
 				{#if submitting}<span class="ml-2"><Spinner /></span>{/if}
 			</button>
-			<p class="mt-4 text-xs leading-5 text-slate-400 dark:text-slate-500">Key 仅发送到此服务并加密保存，用于后续的模型请求。请不要把 Key 发给其他人。</p>
+			<p class="mt-4 text-xs leading-5 text-slate-400 dark:text-slate-500">访问密钥仅发送到此服务并加密保存，用于后续的模型请求。请不要把它发给其他人。</p>
 		</form>
 	</section>
 </div>

@@ -138,10 +138,10 @@
 
 		submitting = true;
 		try {
-			if (mode === 'ldap') {
-				await ldapSignInHandler();
-			} else if (mode === 'sub2api') {
+			if (keyOnlyMode || mode === 'sub2api') {
 				await sub2apiKeySignInHandler();
+			} else if (mode === 'ldap') {
+				await ldapSignInHandler();
 			} else if (mode === 'signin') {
 				await signInHandler();
 			} else {
@@ -315,7 +315,7 @@
 										{:else if mode === 'signin'}
 											{$i18n.t(`Sign in to {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
 										{:else if mode === 'sub2api'}
-											{$i18n.t(`Sign in to {{WEBUI_NAME}} with a Sub2API key`, {
+											{$i18n.t(`Sign in to {{WEBUI_NAME}} with a Yanchuan access key`, {
 												WEBUI_NAME: $WEBUI_NAME
 											})}
 										{:else}
@@ -373,14 +373,14 @@
 												<label
 													for="sub2api-api-key"
 													class="text-sm font-normal text-left mb-1 block"
-													>{$i18n.t('Sub2API API Key')}</label
+													>{$i18n.t('Yanchuan access key')}</label
 												>
 												<SensitiveInput
 													bind:value={sub2apiApiKey}
 													type="password"
 													id="sub2api-api-key"
 													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
-													placeholder={$i18n.t('Paste your Sub2API API key')}
+													placeholder={$i18n.t('Paste your Yanchuan access key')}
 													autocomplete="off"
 													name="sub2api-api-key"
 													screenReader={true}
@@ -477,7 +477,7 @@
 													{mode === 'signin'
 														? $i18n.t('Sign in')
 														: mode === 'sub2api'
-															? $i18n.t('Sign in with Sub2API key')
+															? $i18n.t('Sign in with Yanchuan access key')
 															: ($config?.onboarding ?? false)
 																? $i18n.t('Create Admin Account')
 																: $i18n.t('Create Account')}
@@ -530,10 +530,10 @@
 														class="font-normal underline"
 														type="button"
 														on:click={() => {
-															mode = 'sub2api';
-														}}
+																mode = 'sub2api';
+															}}
 													>
-														{$i18n.t('Sign in with a Sub2API key')}
+														{$i18n.t('Sign in with a Yanchuan access key')}
 													</button>
 												{/if}
 											</div>
