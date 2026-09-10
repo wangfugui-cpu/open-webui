@@ -564,6 +564,16 @@ async def upload_image(request, image_data, content_type, metadata, user, db=Non
 
 @router.post('/generations')
 async def generate_images(request: Request, form_data: CreateImageForm, user=Depends(get_verified_user)):
+    # Native chat tools call image_generations() directly after their operation and
+    # execution records have been claimed.  This legacy HTTP endpoint has no such
+    # operation identity, so leave it closed unless an administrator explicitly
+    # enables it for a separately protected integration.
+    if not await Config.get('images.direct_api.enable', False):
+        raise HTTPException(
+            status_code=403,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
     image_config = await get_image_config()
     if not image_config.ENABLE_IMAGE_GENERATION:
         raise HTTPException(
@@ -867,6 +877,14 @@ async def edit_images(request: Request, form_data: EditImageForm, user=Depends(g
     # global image-edit switch and the per-user image-generation permission. The internal
     # callers (edit_image tool, chat middleware) gate themselves and call image_edits()
     # directly, so they are unaffected by this wrapper.
+    # See /generations: direct image endpoints cannot participate in the
+    # operation/execution idempotency protocol used by native chat tools.
+    if not await Config.get('images.direct_api.enable', False):
+        raise HTTPException(
+            status_code=403,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
     image_config = await get_image_config()
     if not image_config.ENABLE_IMAGE_EDIT:
         raise HTTPException(
@@ -909,6 +927,12 @@ async def image_edits(
     size = None
     width, height = None, None
     metadata = metadata or {}
+
+    if not form_data.image or (isinstance(form_data.image, list) and not any(form_data.image)):
+        raise HTTPException(
+            status_code=400,
+            detail='Image editing requires at least one accessible source image.',
+        )
 
     if (image_config.IMAGE_EDIT_SIZE and 'x' in image_config.IMAGE_EDIT_SIZE) or (
         form_data.size and 'x' in form_data.size

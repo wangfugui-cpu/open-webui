@@ -909,7 +909,11 @@ async def create_sub2api_key_user(
         email=email,
         password=await get_password_hash(str(uuid.uuid4())),
         name=name,
-        role=await Config.get('ui.default_user_role'),
+        # An external API-key identity is an end user, never an administrator.
+        # Deployment defaults may deliberately make local sign-ups administrators
+        # during first-run setup; applying that default here would grant a
+        # verified-but-unprivileged Sub2API key cross-account access.
+        role='user',
         oauth={SUB2API_OAUTH_METADATA_KEY: {'subject': subject}},
         db=db,
     )

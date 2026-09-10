@@ -29,6 +29,7 @@ from open_webui.config import (
 )
 from open_webui.constants import TASKS
 from open_webui.env import (
+    AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT,
     BYPASS_MODEL_ACCESS_CONTROL,
     CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS,
     CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE,
@@ -38,7 +39,6 @@ from open_webui.env import (
     ENABLE_QUERIES_CACHE,
     ENABLE_REALTIME_CHAT_SAVE,
     ENABLE_RESPONSES_API_STATEFUL,
-    ENABLE_SUB2API_KEY_LOGIN,
     GLOBAL_LOG_LEVEL,
     RAG_SYSTEM_CONTEXT,
 )
@@ -50,6 +50,7 @@ from open_webui.models.folders import Folders
 from open_webui.models.models import Models
 from open_webui.models.notes import Notes
 from open_webui.models.oauth_sessions import OAuthSessions
+from open_webui.models.operations import EXECUTION_DELIVERY_PENDING, Operations
 from open_webui.models.users import UserModel, Users
 from open_webui.retrieval.utils import get_sources_from_items
 from open_webui.routers.images import (
@@ -144,6 +145,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+CHARGEABLE_IMAGE_TOOLS = {'edit_image', 'generate_image'}
 
 
 def _is_tool_result_error(value: Any) -> bool:
@@ -186,6 +188,70 @@ def _is_tool_result_error(value: Any) -> bool:
         )
 
     return False
+
+
+def _image_result_files(value: Any) -> list[dict]:
+    parsed = value
+    while isinstance(parsed, str):
+        try:
+            parsed = JSONCodec.loads(parsed)
+        except (JSONCodec.JSONDecodeError, TypeError, ValueError):
+            return []
+    images = parsed.get('images', []) if isinstance(parsed, dict) else []
+    return [{'type': 'image', **image} for image in images if isinstance(image, dict) and image.get('id')]
+
+
+def _local_image_validation_error(tool_name: str, params: dict) -> str | None:
+    if tool_name == 'edit_image' and not isinstance(params.get('image_urls'), list):
+        return 'Error: image_reference_required. Image editing requires an accessible source image.'
+    if tool_name == 'edit_image' and not params.get('image_urls'):
+        return 'Error: image_reference_required. Image editing requires an accessible source image.'
+    return None
+
+
+async def _claim_chargeable_image_execution(metadata: dict, tool_call_id: str, tool_name: str, params: dict):
+    operation_id = metadata.get('operation_id')
+    owner_token = metadata.get('operation_owner_token')
+    lane_id = metadata.get('operation_lane_id') or metadata.get('message_id')
+    if not operation_id or not owner_token or not lane_id or tool_name not in CHARGEABLE_IMAGE_TOOLS:
+        return None
+    source_refs = [{'url': value} for value in params.get('image_urls', []) if isinstance(value, str)]
+    return await Operations.claim_image_execution(
+        operation_id=operation_id,
+        owner_token=owner_token,
+        lane_id=lane_id,
+        raw_tool_call_id=tool_call_id or None,
+        tool_name=tool_name,
+        parameters=params,
+        source_file_refs=source_refs,
+        locally_invalid=_local_image_validation_error(tool_name, params),
+    )
+
+
+async def _complete_chargeable_image_execution(claim, metadata: dict, result: Any) -> Any:
+    if claim is None:
+        return result
+    if claim.action in {'block', 'local_error'}:
+        return {'error': claim.content or 'Image execution is blocked pending confirmation.'}
+    if claim.execution is None:
+        return result
+    if claim.action == 'reuse':
+        return claim.execution.result
+
+    owner_token = metadata['operation_owner_token']
+    current = await Operations.get_execution(claim.execution.id)
+    if current and current.status == EXECUTION_DELIVERY_PENDING:
+        return result
+    if _is_tool_result_error(result):
+        await Operations.mark_execution_unknown(claim.execution.id, owner_token, tool_result_content(result))
+        return result
+    await Operations.mark_execution_completed(
+        claim.execution.id,
+        owner_token,
+        result,
+        _image_result_files(result),
+    )
+    return result
 
 
 def normalize_messages_for_model(form_data: dict) -> dict:
@@ -1205,6 +1271,39 @@ async def process_tool_result(
     if isinstance(tool_result, dict) or isinstance(tool_result, list):
         tool_result = json.dumps(tool_result, indent=2, ensure_ascii=False)
 
+    # Built-in image tools return a JSON acknowledgement because the image is
+    # delivered through the chat file association.  Preserve those image file
+    # references in the Responses output too: the next model turn needs the
+    # actual saved result as input, not just a textual acknowledgement.
+    if tool_function_name in CHARGEABLE_IMAGE_TOOLS and isinstance(tool_result, str):
+        try:
+            image_result = JSONCodec.loads(tool_result)
+        except Exception:
+            image_result = None
+        if isinstance(image_result, dict) and isinstance(image_result.get('images'), list):
+            existing_image_keys = {
+                (item.get('id'), item.get('url'))
+                for item in tool_result_files
+                if isinstance(item, dict) and item.get('type') == 'image'
+            }
+            for image in image_result['images']:
+                if not isinstance(image, dict):
+                    continue
+                image_file = {
+                    'type': 'image',
+                    **{
+                        key: image[key]
+                        for key in ('id', 'url', 'name', 'content_type')
+                        if image.get(key)
+                    },
+                }
+                if not image_file.get('id') and not image_file.get('url'):
+                    continue
+                image_key = (image_file.get('id'), image_file.get('url'))
+                if image_key not in existing_image_keys:
+                    tool_result_files.append(image_file)
+                    existing_image_keys.add(image_key)
+
     # Safety: ensure tool_result is always a string (or None) to prevent
     # downstream TypeError when concatenating (e.g. if an upstream callable
     # returned a tuple that was not unpacked by the branches above).
@@ -1216,6 +1315,22 @@ async def process_tool_result(
             tool_result = str(tool_result)
 
     return tool_result, tool_result_files, tool_result_embeds
+
+
+async def get_tool_result_image_input_url(file_item: dict, user) -> str | None:
+    """Load a saved tool-result image for the next model turn with file ACLs."""
+    if file_item.get('type') != 'image':
+        return None
+    image_url = file_item.get('url', '')
+    if image_url.startswith('data:image/'):
+        return image_url
+
+    # Internal chat file URLs are presentation URLs, not file IDs. Prefer the
+    # persisted ID so the canonical resolver enforces the current user's ACL.
+    source = file_item.get('id') or image_url
+    if not source:
+        return None
+    return await get_image_base64_from_url(source, user=user)
 
 
 async def terminal_event_handler(
@@ -1671,21 +1786,110 @@ async def chat_web_search_handler(request: Request, form_data: dict, extra_param
     return form_data
 
 
-def get_images_from_messages(message_list):
-    images = []
+def get_image_references_from_message(message: dict | None) -> list[dict]:
+    """Extract image references from one user message without consulting chat history.
 
-    for message in reversed(message_list):
-        message_images = []
-        for file in message.get('files', []):
-            if file.get('type') == 'image':
-                message_images.append(file.get('url'))
-            elif file.get('content_type', '').startswith('image/'):
-                message_images.append(file.get('url'))
+    The UI intentionally excludes images from its top-level ``files`` payload because
+    that payload feeds file retrieval/RAG. The complete current-turn attachment set
+    instead lives on ``user_message.files``. Temporary chats can represent the same
+    images as OpenAI ``image_url`` content parts, so support both shapes here.
+    """
+    if not isinstance(message, dict):
+        return []
 
-        if message_images:
-            images.append(message_images)
+    references = []
+    seen = set()
 
-    return images
+    def add_reference(file_id=None, url=None, content_type=None):
+        reference = url or file_id
+        if not isinstance(reference, str) or not reference or reference in seen:
+            return
+        seen.add(reference)
+        references.append(
+            {
+                **({'id': file_id} if isinstance(file_id, str) and file_id else {}),
+                **({'url': url} if isinstance(url, str) and url else {}),
+                **({'content_type': content_type} if isinstance(content_type, str) and content_type else {}),
+            }
+        )
+
+    for file in message.get('files') or []:
+        if not isinstance(file, dict):
+            continue
+        content_type = file.get('content_type') or file.get('mime_type')
+        if file.get('type') == 'image' or str(content_type or '').startswith('image/'):
+            add_reference(file.get('id'), file.get('url'), content_type)
+
+    content = message.get('content')
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict) or item.get('type') != 'image_url':
+                continue
+            image_url = item.get('image_url')
+            url = image_url.get('url') if isinstance(image_url, dict) else image_url
+            add_reference(url=url, content_type='image/*')
+
+    return references
+
+
+def get_current_user_image_references(metadata: dict, messages: list[dict]) -> list[dict]:
+    """Return only image references supplied with the current user turn.
+
+    Persistent UI chats supply the full message through ``metadata.user_message``;
+    temporary chats do too, but fall back to their final user message for external
+    callers that omit that field. Deliberately never scan older messages here:
+    history is model context, not an implicit edit instruction.
+    """
+    current_message = metadata.get('user_message')
+    if isinstance(current_message, dict) and current_message.get('role', 'user') == 'user':
+        references = get_image_references_from_message(current_message)
+        if references:
+            return references
+
+        # Some temporary/API clients put the current image only in the OpenAI
+        # content parts while metadata.user_message carries the text and an empty
+        # files array. Fall back only to the final user message when it is the
+        # same current turn; never search older messages for a source image.
+        candidate = get_last_user_message_item(messages or [])
+        if candidate and (
+            (current_message.get('id') and candidate.get('id') == current_message.get('id'))
+            or (
+                get_content_from_message(candidate)
+                and get_content_from_message(candidate) == get_content_from_message(current_message)
+            )
+        ):
+            return get_image_references_from_message(candidate)
+
+        # An empty attachment set is meaningful: do not fall back to a
+        # historical image merely because this current message has no image.
+        return []
+
+    for message in reversed(messages or []):
+        if isinstance(message, dict) and message.get('role') == 'user':
+            return get_image_references_from_message(message)
+
+    return []
+
+
+def get_image_reference_urls(references: list[dict] | None) -> list[str]:
+    """Return stable editable URL/ID values from current-turn image references."""
+    urls = []
+    for reference in references or []:
+        if not isinstance(reference, dict):
+            continue
+        value = reference.get('url') or reference.get('id')
+        if isinstance(value, str) and value and value not in urls:
+            urls.append(value)
+    return urls
+
+
+def should_handle_direct_image_generation(metadata: dict | None) -> bool:
+    """Return whether the legacy UI flow, rather than native tools, owns image generation.
+
+    Native function-calling sessions must retain image tools so the selected chat model can
+    distinguish a new image from an edit of an attached or previously generated image.
+    """
+    return ((metadata or {}).get('params') or {}).get('function_calling') == 'legacy'
 
 
 async def get_image_urls(delta_images, request, metadata, user) -> list[str]:
@@ -1792,20 +1996,21 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
     user_message = get_last_user_message(message_list)
 
     prompt = user_message
-    message_images = get_images_from_messages(message_list)
-
-    # Limit to first 2 sets of images
-    # We may want to change this in the future to allow more images
-    input_images = []
-    for idx, images in enumerate(message_images):
-        if idx >= 2:
-            break
-        for image in images:
-            input_images.append(image)
+    # Legacy direct image generation has no native tool call in which a model can
+    # choose an edit target. Treat only a source supplied in this turn as an edit;
+    # historical images remain context and must not block an explicitly new image.
+    input_images = get_image_reference_urls(
+        extra_params.get('__current_user_image_refs__')
+        or metadata.get('current_user_image_refs')
+        or get_current_user_image_references(metadata, form_data.get('messages', []))
+    )
 
     # Called directly, bypassing the /images routes that enforce these switches.
-    editing = len(input_images) > 0 and await Config.get('images.edit.enable')
-    if not editing and not await Config.get('image_generation.enable'):
+    # An explicit source image means an edit was requested. Never turn that into a new image
+    # merely because editing is disabled; the native tool path follows the same rule.
+    image_edit_enabled = await Config.get('images.edit.enable')
+    editing = len(input_images) > 0 and image_edit_enabled
+    if not input_images and not editing and not await Config.get('image_generation.enable'):
         return form_data
 
     if is_saved_chat_id(chat_id):
@@ -1818,7 +2023,23 @@ async def chat_image_generation_handler(request: Request, form_data: dict, extra
 
     system_message_content = ''
 
-    if editing:
+    if input_images and not image_edit_enabled:
+        await __event_emitter__(
+            {
+                'type': 'status',
+                'data': {
+                    'description': 'Image editing is disabled',
+                    'done': True,
+                    'error': True,
+                },
+            }
+        )
+        system_message_content = (
+            '<context>The user supplied an image to edit, but image editing is disabled. '
+            'No replacement image was generated. Tell the user that image editing is unavailable.</context>'
+        )
+
+    elif editing:
         # Edit image(s)
         try:
             images = await image_edits(
@@ -2407,6 +2628,14 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     form_data = apply_params_to_form_data(form_data, model)
     log.debug('form_data: %s', form_data)
 
+    # Keep current image attachments separate from metadata.files. The latter is
+    # intentionally image-free RAG/file-retrieval state, while this field is only
+    # used by image tools and legacy direct-image handling.
+    metadata['current_user_image_refs'] = get_current_user_image_references(
+        metadata,
+        form_data.get('messages', []),
+    )
+
     # Guided regeneration: extract before it reaches the LLM provider
     regeneration_prompt = form_data.pop('regeneration_prompt', None)
 
@@ -2525,6 +2754,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         '__model__': model,
         '__chat_id__': metadata.get('chat_id'),
         '__message_id__': metadata.get('message_id'),
+        '__current_user_image_refs__': metadata['current_user_image_refs'],
     }
     # Initialize events to store additional event to be sent to the client
     # Initialize contexts and citation
@@ -2685,15 +2915,10 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 'features.image_generation',
                 await Config.get('user.permissions'),
             ):
-                # A Sub2API key session is an OpenAI-compatible proxy.  Its chat model may
-                # decline a native tool call even after the user explicitly selected the
-                # image button, which leaves the user with a text-only answer.  Treat the
-                # button as an explicit image-generation request and call the image endpoint
-                # directly.  The normal native-tool behaviour remains unchanged elsewhere.
-                if (
-                    metadata.get('params', {}).get('function_calling') == 'legacy'
-                    or ENABLE_SUB2API_KEY_LOGIN
-                ):
+                # Legacy mode has no native tool loop, so the image toggle remains a direct
+                # request. Native sessions, including Sub2API-key sessions, retain the image
+                # tools and let the selected model choose generation, editing, or text only.
+                if should_handle_direct_image_generation(metadata):
                     form_data = await chat_image_generation_handler(request, form_data, extra_params, user)
                     # The image is already generated above. Do not also expose generate_image
                     # as a native tool to the chat model, which could create a duplicate image.
@@ -3192,9 +3417,17 @@ async def execute_tool_call_for_output(request, form_data, user, metadata, event
     direct_tool = tool.get('direct', False)
     allowed_params = spec.get('parameters', {}).get('properties', {}).keys()
     params = {key: value for key, value in params.items() if key in allowed_params}
+    execution_claim = await _claim_chargeable_image_execution(
+        metadata,
+        tool_call.get('id', ''),
+        name,
+        params,
+    )
 
     try:
-        if direct_tool:
+        if execution_claim and execution_claim.action in {'reuse', 'block', 'local_error'}:
+            result = await _complete_chargeable_image_execution(execution_claim, metadata, None)
+        elif direct_tool:
             if not event_caller:
                 result = 'Error: Browser session is not connected for this direct tool.'
             else:
@@ -3216,11 +3449,16 @@ async def execute_tool_call_for_output(request, form_data, user, metadata, event
                 extra_params={
                     '__messages__': form_data.get('messages', []),
                     '__files__': metadata.get('files', []),
+                    '__current_user_image_refs__': metadata.get('current_user_image_refs', []),
+                    '__operation_execution_id__': execution_claim.execution.id if execution_claim else None,
+                    '__operation_owner_token__': metadata.get('operation_owner_token'),
                 },
             )
             result = await function(**params)
     except Exception as e:
         result = {'error': str(e)}
+    if execution_claim and execution_claim.action == 'execute':
+        result = await _complete_chargeable_image_execution(execution_claim, metadata, result)
 
     terminal_file_result = build_terminal_file_tool_result(name, params, result, tool, metadata)
     if terminal_file_result:
@@ -3319,10 +3557,10 @@ async def drain_approved_tool_calls(request, form_data, user, model, metadata) -
         item['status'] = 'failed' if _is_tool_result_error(result.get('content', '')) else 'completed'
         display_files = []
         for file_item in result.get('files', []):
-            if file_item.get('type') == 'image' and file_item.get('url', '').startswith('data:'):
-                output_parts.append({'type': 'input_image', 'image_url': file_item['url']})
-            else:
-                display_files.append(file_item)
+            image_input_url = await get_tool_result_image_input_url(file_item, user)
+            if image_input_url:
+                output_parts.append({'type': 'input_image', 'image_url': image_input_url})
+            display_files.append(file_item)
 
         output.append(
             {
@@ -4179,7 +4417,7 @@ async def non_streaming_chat_response_handler(response, ctx):
                         **({'usage': usage} if usage else {}),
                     }
                     await outlet_filter_handler(ctx)
-                    await background_tasks_handler(ctx)
+                    schedule_background_tasks(ctx)
 
             response = build_response_object(response, merge_events_into_response(response_data, events))
         except Exception as e:
@@ -4225,6 +4463,26 @@ async def non_streaming_chat_response_handler(response, ctx):
     return response
 
 
+def schedule_background_tasks(ctx) -> asyncio.Task:
+    """Run post-response helpers without extending the user operation lease.
+
+    Title, tag, and follow-up generation are independent best-effort work.
+    The primary assistant reply is already durable before this point, so an
+    unavailable helper model must neither keep the chat task active nor leave
+    its idempotency operation RUNNING.
+    """
+
+    async def run_background_tasks():
+        try:
+            await background_tasks_handler(ctx)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception('Post-response background task failed')
+
+    return asyncio.create_task(run_background_tasks())
+
+
 async def streaming_chat_response_handler(response, ctx):
     request = ctx['request']
 
@@ -4240,6 +4498,17 @@ async def streaming_chat_response_handler(response, ctx):
     event_caller = ctx['event_caller']
     chat_id = metadata.get('chat_id') or ''
     save_to_chat = is_saved_chat_id(chat_id)
+
+    # A persisted chat can be submitted while its browser socket is absent
+    # (refresh, reconnect, or a REST replay).  The native tool loop is a
+    # server-side responsibility: falling back to raw streaming here skipped
+    # tool execution and durable delivery altogether.  Keep notifications
+    # best-effort, but run the same loop with a no-op emitter when the chat is
+    # already saved.
+    if event_emitter is None and save_to_chat:
+
+        async def event_emitter(_event):
+            return None
 
     extra_params = {
         '__event_emitter__': event_emitter,
@@ -4810,7 +5079,35 @@ async def streaming_chat_response_handler(response, ctx):
 
                     filter_extra_params = {'__body__': form_data, **extra_params} if filter_functions else None
 
-                    async for line in response.body_iterator:
+                    # TCP/SSE comment keepalives prove only that a connection
+                    # remains open.  They do not prove that the provider is
+                    # making progress toward a model result or a native tool
+                    # command.  Bound the interval between *data:* events so
+                    # a stalled provider cannot retain a chat task and its
+                    # operation lease indefinitely.
+                    stream_iterator = response.body_iterator.__aiter__()
+                    last_semantic_event_at = time.monotonic()
+                    while True:
+                        try:
+                            if AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT is None:
+                                line = await anext(stream_iterator)
+                            else:
+                                remaining = AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT - (
+                                    time.monotonic() - last_semantic_event_at
+                                )
+                                if remaining <= 0:
+                                    raise TimeoutError(
+                                        'Upstream stream made no semantic progress before the idle deadline.'
+                                    )
+                                async with asyncio.timeout(remaining):
+                                    line = await anext(stream_iterator)
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError as e:
+                            raise TimeoutError(
+                                'Upstream stream made no semantic progress before the idle deadline.'
+                            ) from e
+
                         line = line.decode('utf-8', 'replace') if isinstance(line, bytes) else line
                         data = line
 
@@ -4845,6 +5142,8 @@ async def streaming_chat_response_handler(response, ctx):
 
                         # Remove the "data:" prefix
                         data = data[5:].strip()
+                        if data:
+                            last_semantic_event_at = time.monotonic()
 
                         try:
                             data = JSONCodec.loads(data)
@@ -5555,6 +5854,18 @@ async def streaming_chat_response_handler(response, ctx):
 
                 try:
                     await stream_body_handler(response, form_data)
+                except Exception as e:
+                    # The request reached the provider, but an interrupted
+                    # stream leaves its final tool/result state unknowable.
+                    # Native tool calls are claimed only after the stream
+                    # ends, so this can legitimately have no execution row.
+                    # Preserve that uncertainty for the operation replay
+                    # boundary rather than allowing an automatic resend.
+                    metadata['operation_result_unknown'] = {
+                        'code': 'upstream_stream_interrupted',
+                        'message': str(e),
+                    }
+                    raise
                 finally:
                     if response.background:
                         await response.background()
@@ -5692,8 +6003,16 @@ async def streaming_chat_response_handler(response, ctx):
                         direct_tool = tool.get('direct', False)
                         allowed_params = spec.get('parameters', {}).get('properties', {}).keys()
                         params = {key: value for key, value in params.items() if key in allowed_params}
+                        execution_claim = await _claim_chargeable_image_execution(
+                            metadata,
+                            tool_call.get('id', ''),
+                            name,
+                            params,
+                        )
                         try:
-                            if direct_tool:
+                            if execution_claim and execution_claim.action in {'reuse', 'block', 'local_error'}:
+                                result = await _complete_chargeable_image_execution(execution_claim, metadata, None)
+                            elif direct_tool:
                                 result = await event_caller(
                                     {
                                         'type': 'execute:tool',
@@ -5712,11 +6031,18 @@ async def streaming_chat_response_handler(response, ctx):
                                     extra_params={
                                         '__messages__': form_data.get('messages', []),
                                         '__files__': metadata.get('files', []),
+                                        '__current_user_image_refs__': metadata.get('current_user_image_refs', []),
+                                        '__operation_execution_id__': (
+                                            execution_claim.execution.id if execution_claim else None
+                                        ),
+                                        '__operation_owner_token__': metadata.get('operation_owner_token'),
                                     },
                                 )
                                 result = await function(**params)
                         except Exception as e:
                             result = {'error': str(e)}
+                        if execution_claim and execution_claim.action == 'execute':
+                            result = await _complete_chargeable_image_execution(execution_claim, metadata, result)
                         return params, result, tool, tool_type, direct_tool
 
                     delegate_calls = [
@@ -5824,12 +6150,13 @@ async def streaming_chat_response_handler(response, ctx):
                         # other files (for frontend display via files attribute).
                         display_files = []
                         for file_item in result.get('files', []):
-                            if file_item.get('type') == 'image' and file_item.get('url', '').startswith('data:'):
-                                # LLM-only: add as input_image part, not frontend display output.
-                                output_parts.append({'type': 'input_image', 'image_url': file_item['url']})
-                            else:
-                                # Frontend display (MCP images, audio, etc.)
-                                display_files.append(file_item)
+                            image_input_url = await get_tool_result_image_input_url(file_item, user)
+                            if image_input_url:
+                                # The model receives the stored result for the
+                                # next turn; the UI still receives its ordinary
+                                # file record below.
+                                output_parts.append({'type': 'input_image', 'image_url': image_input_url})
+                            display_files.append(file_item)
 
                         output.append(
                             {
@@ -6287,9 +6614,19 @@ async def streaming_chat_response_handler(response, ctx):
                     **({'usage': usage} if usage else {}),
                 }
                 await outlet_filter_handler(ctx)
-                await background_tasks_handler(ctx)
+                schedule_background_tasks(ctx)
             except asyncio.CancelledError:
                 log.warning('Task was cancelled!')
+
+                # The chat request has already reached its provider at this
+                # point.  A user stop or process shutdown cannot prove that a
+                # partially streamed model/tool result was not accepted
+                # upstream, even when the native ToolExecution row has not
+                # been created yet.
+                metadata['operation_result_unknown'] = {
+                    'code': 'upstream_stream_interrupted',
+                    'message': 'The upstream stream was cancelled before its result could be confirmed.',
+                }
 
                 # Close the response body iterator to trigger cleanup
                 # in stream_wrapper's finally block and release the

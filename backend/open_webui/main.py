@@ -142,6 +142,12 @@ from open_webui.models.config import Config
 from open_webui.models.functions import Functions
 from open_webui.models.messages import Messages
 from open_webui.models.models import Models, normalize_model_tags
+from open_webui.models.operations import (
+    OPERATION_RUNNING,
+    Operations,
+    operation_response,
+    request_fingerprint,
+)
 from open_webui.models.users import Users
 from open_webui.routers import (
     analytics,
@@ -1090,6 +1096,8 @@ async def chat_completion(
     form_data: dict,
     user=Depends(get_verified_user),
 ):
+    operation_claim = None
+    operation_launch_started = False
     if not request.app.state.MODELS:
         await get_all_models(request, user=user)
 
@@ -1215,6 +1223,76 @@ async def chat_completion(
 
         chat_variables = normalize_chat_variables(chat_variables)
 
+        # UI-shaped chat submissions must carry a stable user operation key.
+        # Socket connection state is deliberately not part of this decision: a
+        # browser can submit while reconnecting, and letting that request skip
+        # the guard would re-open the paid-image retry hole. Plain
+        # OpenAI-compatible calls do not carry these message identities and
+        # retain their existing synchronous behavior.
+        requires_operation_key = bool(
+            not getattr(request.state, 'internal', False)
+            and user_message
+            and any(entry.get('message_id') for entry in message_ids)
+        )
+        operation_key = request.headers.get('idempotency-key', '').strip()
+        if requires_operation_key and not operation_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    'code': 'idempotency_key_required',
+                    'message': 'A stable Idempotency-Key is required for browser-managed chat execution.',
+                },
+            )
+        if operation_key and len(operation_key) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={'code': 'invalid_idempotency_key', 'message': 'Idempotency-Key is too long.'},
+            )
+
+        if requires_operation_key:
+            # A new chat receives its durable id before any chat or task write.
+            # Replays deliberately fingerprint the new-chat intent, not this generated id.
+            assigned_chat_id = chat_id or (str(uuid4()) if is_new_chat else chat_id)
+            operation_claim = await Operations.acquire(
+                user_id=user.id,
+                client_key=operation_key,
+                fingerprint=request_fingerprint(
+                    model_id=form_data.get('model'),
+                    chat_scope=chat_id if is_saved_chat_id(chat_id) else None,
+                    parent_id=parent_id,
+                    user_message=user_message,
+                    assistant_message_ids=message_ids,
+                    form_data={
+                        **form_data,
+                        'chat_variables': chat_variables,
+                        'model_item': model_item,
+                        'tool_servers': form_data.get('tool_servers'),
+                    },
+                ),
+                chat_id=assigned_chat_id,
+                user_message_id=user_message.get('id') if user_message else None,
+                assistant_message_ids=[
+                    entry['message_id'] for entry in message_ids if entry.get('message_id')
+                ],
+            )
+            if operation_claim.conflict:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        'code': 'idempotency_key_payload_mismatch',
+                        'message': 'This Idempotency-Key belongs to a different request.',
+                    },
+                )
+            if not operation_claim.owns_launch:
+                operation = operation_claim.operation
+                # A delivery-pending lane may coexist with another model lane
+                # that is still RUNNING.  The execution rows, not only the
+                # aggregate operation state, determine whether file recovery
+                # is available.
+                operation = await Operations.recover_delivery(operation.id) or operation
+                return operation_response(operation)
+            chat_id = operation_claim.operation.chat_id
+
         # Drop tool_servers if caller lacks features.direct_tool_servers —
         # mirrors the storage-side strip in user/settings/update.
         tool_servers = form_data.pop('tool_servers', None)
@@ -1274,8 +1352,12 @@ async def chat_completion(
             },
         }
 
+        if operation_claim is not None:
+            metadata['operation_id'] = operation_claim.operation.id
+            metadata['operation_owner_token'] = operation_claim.owner_token
+
         if is_new_chat:
-            metadata['chat_id'] = str(uuid4())
+            metadata['chat_id'] = chat_id or str(uuid4())
 
         initial_title_generation = None
         if is_new_chat and tasks and TASKS.TITLE_GENERATION in tasks:
@@ -1368,7 +1450,7 @@ async def chat_completion(
                                 assistant_message['modelIdx'] = entry['modelIdx']
                             history_messages[assistant_message_id] = assistant_message
 
-                    await Chats.insert_new_chat(
+                    _, chat_created = await Chats.ensure_new_chat(
                         chat_id,
                         user.id,
                         ChatForm(
@@ -1446,7 +1528,7 @@ async def chat_completion(
                             log.debug('Error inserting chat files: %s', e)
                             pass
 
-                    if initial_title_generation is not None and all_assistant_ids:
+                    if initial_title_generation is not None and all_assistant_ids and chat_created:
                         title_metadata = {
                             **metadata,
                             'message_id': all_assistant_ids[0],
@@ -1614,8 +1696,12 @@ async def chat_completion(
         form_data['metadata'] = metadata
 
     except HTTPException:
+        if operation_claim and operation_claim.owns_launch and not operation_launch_started:
+            await Operations.release_ready(operation_claim.operation.id, operation_claim.owner_token)
         raise
     except Exception as e:
+        if operation_claim and operation_claim.owns_launch and not operation_launch_started:
+            await Operations.release_ready(operation_claim.operation.id, operation_claim.owner_token)
         log.warning(f'Error processing chat metadata: {e}')
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1623,6 +1709,7 @@ async def chat_completion(
         )
 
     async def process_chat(request, form_data, user, metadata, model, tasks=None):
+        succeeded = False
         try:
             form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
 
@@ -1641,7 +1728,20 @@ async def chat_completion(
 
             ctx = await build_chat_response_context(request, form_data, user, model, metadata, tasks, events)
 
-            return await process_chat_response(response, ctx)
+            result = await process_chat_response(response, ctx)
+            # A persisted chat runs in a background task, not in FastAPI's
+            # response lifecycle.  The streaming handler performs the native
+            # tool loop, file delivery, and durable message updates while its
+            # body is consumed.  Returning the wrapper here without draining
+            # it made the task look successful after only opening the upstream
+            # connection, leaving tool calls and their results unprocessed.
+            if isinstance(result, StreamingResponse):
+                async for _ in result.body_iterator:
+                    pass
+                if result.background is not None:
+                    await result.background()
+            succeeded = True
+            return result
         except asyncio.CancelledError:
             log.info('Chat processing was cancelled')
             try:
@@ -1695,6 +1795,21 @@ async def chat_completion(
                     detail=error_detail,
                 )
         finally:
+            if (
+                metadata.get('operation_id')
+                and metadata.get('operation_owner_token')
+                and metadata.get('operation_lane_id')
+            ):
+                try:
+                    await Operations.finish_lane(
+                        metadata['operation_id'],
+                        metadata['operation_owner_token'],
+                        metadata['operation_lane_id'],
+                        succeeded,
+                        result_unknown=bool(metadata.get('operation_result_unknown')),
+                    )
+                except Exception:
+                    log.exception('Failed to finalize durable operation lane %s', metadata['operation_lane_id'])
             # Clean up MCP clients.  Each client is isolated so one
             # failure doesn't skip the rest.
             #
@@ -1779,6 +1894,20 @@ async def chat_completion(
         subagent_results = []
         is_internal = getattr(request.state, 'internal', False) is True
         chat_id = metadata['chat_id']
+        planned_task_ids = {
+            entry['message_id']: str(uuid4())
+            for entry in message_ids
+            if entry.get('message_id')
+        }
+        if metadata.get('operation_id'):
+            launch = await Operations.mark_running(
+                metadata['operation_id'],
+                metadata['operation_owner_token'],
+                list(planned_task_ids.values()),
+            )
+            if not launch.owns_launch:
+                return operation_response(launch.operation or operation_claim.operation)
+            operation_launch_started = True
 
         for idx, entry in enumerate(message_ids):
             target_model_id = entry['model_id']
@@ -1790,7 +1919,8 @@ async def chat_completion(
             per_model_metadata = {
                 **metadata,
                 'message_id': assistant_message_id,
-                'task_id': str(uuid4()),
+                'task_id': planned_task_ids[assistant_message_id],
+                'operation_lane_id': assistant_message_id,
             }
 
             # Per-model form_data: own model
@@ -1852,10 +1982,28 @@ async def chat_completion(
             'status': True,
             'task_ids': task_ids,
             'chat_id': chat_id,
+            **(
+                {
+                    'operation_id': metadata['operation_id'],
+                    'operation_status': OPERATION_RUNNING,
+                }
+                if metadata.get('operation_id')
+                else {}
+            ),
         }
     else:
         # Legacy/direct: single model, synchronous
         metadata['message_id'] = message_ids[0]['message_id']
+        metadata['operation_lane_id'] = metadata['message_id']
+        if metadata.get('operation_id'):
+            launch = await Operations.mark_running(
+                metadata['operation_id'],
+                metadata['operation_owner_token'],
+                [str(uuid4())],
+            )
+            if not launch.owns_launch:
+                return operation_response(launch.operation or operation_claim.operation)
+            operation_launch_started = True
         return await process_chat(request, form_data, user, metadata, model, tasks)
 
 

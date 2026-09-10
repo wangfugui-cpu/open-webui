@@ -421,7 +421,9 @@ export const chatCompletion = async (
 export const generateOpenAIChatCompletion = async (
 	token: string = '',
 	body: object,
-	url: string = `${WEBUI_BASE_URL}/api`
+	url: string = `${WEBUI_BASE_URL}/api`,
+	idempotencyKey: string = '',
+	signal?: AbortSignal
 ) => {
 	let error = null;
 
@@ -429,9 +431,11 @@ export const generateOpenAIChatCompletion = async (
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${token}`,
-			'Content-Type': 'application/json'
+			'Content-Type': 'application/json',
+			...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {})
 		},
 		credentials: 'include',
+		signal,
 		body: JSON.stringify(body)
 	})
 		.then(async (res) => {

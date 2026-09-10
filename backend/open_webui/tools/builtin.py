@@ -27,6 +27,7 @@ from open_webui.models.groups import Groups
 from open_webui.models.memories import Memories
 from open_webui.models.messages import Message, Messages
 from open_webui.models.notes import Notes
+from open_webui.models.operations import Operations
 from open_webui.models.users import UserModel
 from open_webui.retrieval.utils import get_content_from_url
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
@@ -72,6 +73,27 @@ from open_webui.utils.sanitize import sanitize_code
 log = logging.getLogger(__name__)
 
 MAX_KNOWLEDGE_BASE_SEARCH_ITEMS = 10_000
+
+
+async def _persist_image_delivery(
+    chat_id: str | None,
+    message_id: str | None,
+    image_files: list[dict],
+    execution_id: str | None,
+    owner_token: str | None,
+) -> list[dict]:
+    if not is_saved_chat_id(chat_id) or not message_id or not image_files:
+        return image_files
+    try:
+        saved = await Chats.add_message_files_by_id_and_message_id(chat_id, message_id, image_files)
+    except Exception as exc:
+        await Operations.mark_delivery_pending(execution_id, owner_token, image_files, str(exc))
+        raise
+    if saved is None:
+        error = 'The generated file was saved but its chat message is unavailable for delivery.'
+        await Operations.mark_delivery_pending(execution_id, owner_token, image_files, error)
+        raise RuntimeError(error)
+    return saved
 
 
 async def _has_write_access_to_note(note, user_id: str) -> bool:
@@ -373,9 +395,14 @@ async def generate_image(
     __event_emitter__: callable = None,
     __chat_id__: str = None,
     __message_id__: str = None,
+    __operation_execution_id__: str | None = None,
+    __operation_owner_token__: str | None = None,
 ) -> str:
     """
     Generate an image based on a text prompt.
+
+    Use edit_image instead when the user asks to transform an existing or referenced image.
+    Use this tool only for a new image unrelated to supplied image references.
 
     :param prompt: A detailed description of the image to generate
     :return: Confirmation that the image was generated, or an error message
@@ -401,14 +428,13 @@ async def generate_image(
         image_files = [{'type': 'image', **img} for img in images]
 
         # Persist files to DB if chat context is available
-        if is_saved_chat_id(__chat_id__) and __message_id__ and images:
-            db_files = await Chats.add_message_files_by_id_and_message_id(
-                __chat_id__,
-                __message_id__,
-                image_files,
-            )
-            if db_files is not None:
-                image_files = db_files
+        image_files = await _persist_image_delivery(
+            __chat_id__,
+            __message_id__,
+            image_files,
+            __operation_execution_id__,
+            __operation_owner_token__,
+        )
 
         # Emit the images to the UI if event emitter is available
         if __event_emitter__ and image_files:
@@ -444,17 +470,50 @@ async def edit_image(
     __event_emitter__: callable = None,
     __chat_id__: str = None,
     __message_id__: str = None,
+    __current_user_image_refs__: list[dict] | None = None,
+    __operation_execution_id__: str | None = None,
+    __operation_owner_token__: str | None = None,
 ) -> str:
     """
     Transform one or more existing images according to a text prompt.
     Supports targeted edits such as adding, removing, replacing, inpainting, extending, or compositing image content.
 
     :param prompt: A description of the transformation to apply to the provided images
-    :param image_urls: Source image URLs to modify or use as composition inputs
+    :param image_urls: Source image URLs to modify or use as composition inputs. Include only
+        the image or images the user asked to edit; do not submit unrelated chat images.
     :return: Confirmation that the images were edited, or an error message
     """
     if __request__ is None:
         return JSONCodec.dumps({'error': 'Request context not available'})
+
+    if not isinstance(image_urls, list) or not image_urls:
+        return JSONCodec.dumps(
+            {
+                'error': {
+                    'code': 'image_reference_required',
+                    'message': (
+                        'Image editing requires at least one accessible source image. Ask the user '
+                        'to upload or identify the image to edit; do not generate a replacement image.'
+                    ),
+                }
+            },
+            ensure_ascii=False,
+        )
+
+    if not await Config.get('images.edit.enable'):
+        source_detail = ' The current turn includes image references.' if __current_user_image_refs__ else ''
+        return JSONCodec.dumps(
+            {
+                'error': {
+                    'code': 'image_editing_unavailable',
+                    'message': (
+                        'Image editing is unavailable. No replacement image was generated.'
+                        f'{source_detail} Ask the user to retry after image editing is enabled.'
+                    ),
+                }
+            },
+            ensure_ascii=False,
+        )
 
     try:
         user = UserModel(**__user__) if __user__ else None
@@ -474,14 +533,13 @@ async def edit_image(
         image_files = [{'type': 'image', **img} for img in images]
 
         # Persist files to DB if chat context is available
-        if is_saved_chat_id(__chat_id__) and __message_id__ and images:
-            db_files = await Chats.add_message_files_by_id_and_message_id(
-                __chat_id__,
-                __message_id__,
-                image_files,
-            )
-            if db_files is not None:
-                image_files = db_files
+        image_files = await _persist_image_delivery(
+            __chat_id__,
+            __message_id__,
+            image_files,
+            __operation_execution_id__,
+            __operation_owner_token__,
+        )
 
         # Emit the images to the UI if event emitter is available
         if __event_emitter__ and image_files:

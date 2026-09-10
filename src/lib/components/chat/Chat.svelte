@@ -398,12 +398,162 @@
 
 	let chatTasks = [];
 
-	let history = {
+	let history: { messages: Record<string, any>; currentId: string | null } = {
 		messages: {},
 		currentId: null
 	};
 
 	let taskIds = null;
+
+	type PendingChatOperation = {
+		userId: string;
+		key: string;
+		body: Record<string, any>;
+		createdAt: number;
+		lastResponse?: Record<string, any>;
+	};
+
+	const PENDING_CHAT_OPERATION_PREFIX = 'yanchuan.pending-chat-operation.';
+	const recoveredPendingOperationKeys = new Set<string>();
+	let pendingRecoveryGeneration = 0;
+	let pendingRecoveryController: AbortController | null = null;
+	let pendingRecoveryAccountId: string | null = null;
+	let pendingRecoveryToken: string | null = null;
+	let pendingRecoveryDestroyed = false;
+
+	const pendingChatOperationStorageKey = (userId: string, operationKey: string) =>
+		`${PENDING_CHAT_OPERATION_PREFIX}${userId}.${operationKey}`;
+
+	const savePendingChatOperation = (operation: PendingChatOperation) => {
+		try {
+			localStorage.setItem(
+				pendingChatOperationStorageKey(operation.userId, operation.key),
+				JSON.stringify(operation)
+			);
+		} catch (error) {
+			console.warn('Unable to save pending chat operation for retry', error);
+		}
+	};
+
+	const completePendingChatOperation = (
+		operation: PendingChatOperation,
+		response?: Record<string, any>
+	) => {
+		if (response?.operation_status === 'COMPLETED') {
+			localStorage.removeItem(pendingChatOperationStorageKey(operation.userId, operation.key));
+			return;
+		}
+		savePendingChatOperation({ ...operation, ...(response ? { lastResponse: response } : {}) });
+	};
+
+	const pendingOperationMessage = (response?: Record<string, any>) =>
+		response?.result?.message ??
+		response?.result?.error ??
+		'A prior paid image request may already have been sent and is awaiting confirmation.';
+
+	const stopPendingChatOperationRecovery = () => {
+		pendingRecoveryGeneration += 1;
+		pendingRecoveryController?.abort();
+		pendingRecoveryController = null;
+		pendingRecoveryAccountId = null;
+		pendingRecoveryToken = null;
+		recoveredPendingOperationKeys.clear();
+	};
+
+	const destroyPendingChatOperationRecovery = () => {
+		pendingRecoveryDestroyed = true;
+		stopPendingChatOperationRecovery();
+	};
+
+	const startPendingChatOperationRecovery = (accountId: string) => {
+		stopPendingChatOperationRecovery();
+		pendingRecoveryDestroyed = false;
+		const token = localStorage.token ?? '';
+		const generation = pendingRecoveryGeneration;
+		const controller = new AbortController();
+		pendingRecoveryAccountId = accountId;
+		pendingRecoveryToken = token;
+		pendingRecoveryController = controller;
+		return recoverPendingChatOperations(accountId, token, generation, controller);
+	};
+
+	const recoverPendingChatOperations = async (
+		accountId: string,
+		token: string = localStorage.token ?? '',
+		generation: number | null = null,
+		controller: AbortController | null = null
+	) => {
+		const isCurrentRecovery = () => {
+			// The one-argument form is retained for small embedding callers.  It
+			// still binds the token snapshot and therefore stops before a second
+			// replay after credentials change.  The chat lifecycle always supplies
+			// a generation, where the full account/lifecycle guard applies.
+			if (generation === null) return localStorage.token === token;
+			return (
+				!pendingRecoveryDestroyed &&
+				generation === pendingRecoveryGeneration &&
+				pendingRecoveryAccountId === accountId &&
+				pendingRecoveryToken === token &&
+				localStorage.token === token &&
+				$user?.id === accountId
+			);
+		};
+
+		if (!isCurrentRecovery()) return;
+		const pendingKeys = Array.from({ length: localStorage.length }, (_, index) =>
+			localStorage.key(index)
+		)
+			.filter((key): key is string => key?.startsWith(PENDING_CHAT_OPERATION_PREFIX) ?? false)
+			.filter((key) => !recoveredPendingOperationKeys.has(key));
+
+		for (const storageKey of pendingKeys) {
+			if (!isCurrentRecovery()) return;
+			try {
+				const operation = JSON.parse(
+					localStorage.getItem(storageKey) ?? ''
+				) as PendingChatOperation;
+				if (operation.userId !== accountId || !operation.key || !operation.body) continue;
+				if (!isCurrentRecovery()) return;
+				recoveredPendingOperationKeys.add(storageKey);
+
+				const response = await generateOpenAIChatCompletion(
+					token,
+					operation.body,
+					`${WEBUI_BASE_URL}/api`,
+					operation.key,
+					controller?.signal
+				);
+				if (!isCurrentRecovery()) return;
+				completePendingChatOperation(operation, response);
+				if (!isCurrentRecovery()) return;
+				if (['UNKNOWN', 'DELIVERY_PENDING'].includes(response?.operation_status)) {
+					toast.error(pendingOperationMessage(response));
+				}
+
+				const replayedNewChat = !operation.body.chat_id && response?.chat_id;
+				if (replayedNewChat && !$chatId && !$temporaryChatEnabled && !embedded) {
+					if (!isCurrentRecovery()) return;
+					await chatId.set(response.chat_id);
+					if (!isCurrentRecovery()) return;
+					window.history.replaceState(window.history.state, '', `/c/${response.chat_id}`);
+					if (!isCurrentRecovery()) return;
+					await refreshChatList(token);
+					if (!isCurrentRecovery()) return;
+					await loadChat();
+					if (!isCurrentRecovery()) return;
+				}
+			} catch (error) {
+				if (!isCurrentRecovery()) return;
+				// Leave the original payload intact. A future page recovery reuses the
+				// same operation key and therefore cannot create another paid execution.
+				console.warn('Pending chat operation replay was not acknowledged', error);
+			}
+		}
+
+		if (generation !== null && pendingRecoveryController === controller) {
+			pendingRecoveryController = null;
+		}
+	};
 
 	// Chat Input
 	let prompt = '';
@@ -1578,6 +1728,14 @@
 			}
 		});
 
+		const userSubscribe = user.subscribe((currentUser) => {
+			if (currentUser?.id) {
+				void startPendingChatOperationRecovery(currentUser.id);
+			} else {
+				stopPendingChatOperationRecovery();
+			}
+		});
+
 		const storageChatInput = sessionStorage.getItem(
 			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
 		);
@@ -1609,6 +1767,7 @@
 
 		return () => {
 			try {
+				destroyPendingChatOperationRecovery();
 				clearTimeout(saveControlsTimer);
 				saveControls();
 				if (chatIdProp && !$temporaryChatEnabled) {
@@ -1617,6 +1776,7 @@
 				pageSubscribe();
 				showControlsSubscribe();
 				selectedFolderSubscribe();
+				userSubscribe();
 
 				// Clear the selected chat when leaving the chat surface (e.g. navigating
 				// to the admin panel), otherwise the previously-viewed chat stays selected
@@ -3352,7 +3512,10 @@
 						// regenerations in a duplicate-model chat, which would otherwise lose their
 						// column identity and collapse on reload.
 						messageIdsList: messageIdsList.length > 0 ? messageIdsList : undefined,
-						regenerationPrompt
+						regenerationPrompt,
+						// A fresh user action (including explicit regeneration) receives a
+						// new identity. Network/page recovery must keep this value unchanged.
+						operationKey: uuidv4()
 					}
 				);
 			} finally {
@@ -3407,13 +3570,16 @@
 		{
 			messageIdsList,
 			regenerationPrompt,
-			continueResponse = false
+			continueResponse = false,
+			operationKey
 		}: {
 			messageIdsList?: Array<{ model_id: string; message_id: string }>;
 			regenerationPrompt?: string | null;
 			continueResponse?: boolean;
+			operationKey?: string;
 		} = {}
 	) => {
+		const stableOperationKey = operationKey ?? uuidv4();
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
 
@@ -3545,72 +3711,86 @@
 		const useChatVariablesFallback =
 			!_chatId || $temporaryChatEnabled || isTemporaryChatId(_chatId);
 
+		const requestBody = {
+			stream: stream,
+			model: model.id,
+			...(messages.length > 0 ? { messages } : {}),
+			params: {
+				...$settings?.params,
+				...params,
+				stop: getStopTokens()
+			},
+
+			files: (files?.length ?? 0) > 0 ? files : undefined,
+
+			filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
+			tool_ids: toolIds.length > 0 ? toolIds : undefined,
+			skill_ids: skillIds.length > 0 ? skillIds : undefined,
+			terminal_id:
+				terminalEnabled &&
+				($terminalServers ?? []).some((t) => t.id && t.id === $selectedTerminalId)
+					? $selectedTerminalId
+					: undefined,
+			tool_servers: [
+				...($toolServers ?? []).filter(
+					(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
+				),
+				// Direct terminal servers — always included when enabled (not routed through selectedToolIds)
+				...($terminalServers ?? []).filter((t) => !t.id)
+			],
+			features: getFeatures(),
+			variables: {
+				...getPromptVariables(
+					$user?.name,
+					$settings?.userLocation ? userLocation : undefined,
+					$user?.email
+				)
+			},
+			...(useChatVariablesFallback ? { chat_variables: chatVariables } : {}),
+			model_item: $models.find((m) => m.id === model.id),
+
+			session_id: $socket?.id,
+			chat_id: _chatId || undefined,
+			folder_id: $selectedFolder?.id ?? undefined,
+
+			id: responseMessageId,
+			...(messageIdsList ? { message_ids: messageIdsList } : {}),
+			parent_id: userMessage?.parentId ?? null,
+			user_message: userMessage,
+			...(regenerationPrompt ? { regeneration_prompt: regenerationPrompt } : {}),
+			...(continueResponse ? { assistant_message_id: responseMessageId } : {}),
+
+			background_tasks: {
+				...(!$temporaryChatEnabled &&
+				(!_chatId ||
+					(embedded &&
+						(userMessage?.parentId ?? null) === null &&
+						createMessagesList(_history, responseMessageId).length === 2))
+					? {
+							title_generation: $settings?.title?.auto ?? true,
+							tags_generation: $settings?.autoTags ?? true
+						}
+					: {}),
+				follow_up_generation: $settings?.autoFollowUps ?? true
+			}
+		};
+		const pendingOperation: PendingChatOperation | null = $user?.id
+			? {
+					userId: $user.id,
+					key: stableOperationKey,
+					body: structuredClone(requestBody),
+					createdAt: Date.now()
+				}
+			: null;
+		if (pendingOperation) {
+			savePendingChatOperation(pendingOperation);
+		}
+
 		const res = await generateOpenAIChatCompletion(
 			localStorage.token,
-			{
-				stream: stream,
-				model: model.id,
-				...(messages.length > 0 ? { messages } : {}),
-				params: {
-					...$settings?.params,
-					...params,
-					stop: getStopTokens()
-				},
-
-				files: (files?.length ?? 0) > 0 ? files : undefined,
-
-				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
-				tool_ids: toolIds.length > 0 ? toolIds : undefined,
-				skill_ids: skillIds.length > 0 ? skillIds : undefined,
-				terminal_id:
-					terminalEnabled &&
-					($terminalServers ?? []).some((t) => t.id && t.id === $selectedTerminalId)
-						? $selectedTerminalId
-						: undefined,
-				tool_servers: [
-					...($toolServers ?? []).filter(
-						(server, idx) => toolServerIds.includes(idx) || toolServerIds.includes(server?.id)
-					),
-					// Direct terminal servers — always included when enabled (not routed through selectedToolIds)
-					...($terminalServers ?? []).filter((t) => !t.id)
-				],
-				features: getFeatures(),
-				variables: {
-					...getPromptVariables(
-						$user?.name,
-						$settings?.userLocation ? userLocation : undefined,
-						$user?.email
-					)
-				},
-				...(useChatVariablesFallback ? { chat_variables: chatVariables } : {}),
-				model_item: $models.find((m) => m.id === model.id),
-
-				session_id: $socket?.id,
-				chat_id: _chatId || undefined,
-				folder_id: $selectedFolder?.id ?? undefined,
-
-				id: responseMessageId,
-				...(messageIdsList ? { message_ids: messageIdsList } : {}),
-				parent_id: userMessage?.parentId ?? null,
-				user_message: userMessage,
-				...(regenerationPrompt ? { regeneration_prompt: regenerationPrompt } : {}),
-				...(continueResponse ? { assistant_message_id: responseMessageId } : {}),
-
-				background_tasks: {
-					...(!$temporaryChatEnabled &&
-					(!_chatId ||
-						(embedded &&
-							(userMessage?.parentId ?? null) === null &&
-							createMessagesList(_history, responseMessageId).length === 2))
-						? {
-								title_generation: $settings?.title?.auto ?? true,
-								tags_generation: $settings?.autoTags ?? true
-							}
-						: {}),
-					follow_up_generation: $settings?.autoFollowUps ?? true
-				}
-			},
-			`${WEBUI_BASE_URL}/api`
+			requestBody,
+			`${WEBUI_BASE_URL}/api`,
+			stableOperationKey
 		).catch(async (error) => {
 			console.log(error);
 
@@ -3639,7 +3819,17 @@
 		});
 
 		if (res) {
-			if (res.error) {
+			if (pendingOperation) {
+				completePendingChatOperation(pendingOperation, res);
+			}
+			if (['UNKNOWN', 'DELIVERY_PENDING'].includes(res.operation_status)) {
+				const errorMessage = pendingOperationMessage(res);
+				toast.error(errorMessage);
+				responseMessage.error = { content: errorMessage };
+				responseMessage.done = true;
+				history.messages[responseMessageId] = responseMessage;
+				history.currentId = responseMessageId;
+			} else if (res.error) {
 				await handleOpenAIError(res.error, responseMessage);
 			} else {
 				// Backend returns task_ids (multi-model) or task_id (single model)

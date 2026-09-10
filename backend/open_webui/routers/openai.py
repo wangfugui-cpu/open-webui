@@ -229,12 +229,27 @@ async def get_headers_and_cookies(
 
 
 def is_sub2api_key_login_connection(url: str | None) -> bool:
-    return bool(
-        ENABLE_SUB2API_KEY_LOGIN
-        and SUB2API_KEY_LOGIN_BASE_URL
-        and url
-        and url.rstrip('/') == f'{SUB2API_KEY_LOGIN_BASE_URL}/v1'
-    )
+    """Match only this configured gateway's OpenAI v1 endpoint and its children.
+
+    Provider routing passes the base URL while model discovery and completions
+    pass a concrete resource URL.  Treating only the base URL as a match made
+    those real requests silently lose the member credential.  Scheme, netloc,
+    and the ``/v1`` path boundary remain exact so another provider cannot
+    inherit a Sub2API key.
+    """
+    if not (ENABLE_SUB2API_KEY_LOGIN and SUB2API_KEY_LOGIN_BASE_URL and url):
+        return False
+
+    configured = urlparse(f'{SUB2API_KEY_LOGIN_BASE_URL}/v1')
+    candidate = urlparse(url)
+    if (candidate.scheme, candidate.netloc) != (configured.scheme, configured.netloc):
+        return False
+
+    configured_path = configured.path.rstrip('/')
+    candidate_path = candidate.path.rstrip('/')
+    if any(segment in {'.', '..'} for segment in candidate_path.split('/')):
+        return False
+    return candidate_path == configured_path or candidate_path.startswith(f'{configured_path}/')
 
 
 def is_sub2api_key_login_user(user: UserModel | None) -> bool:

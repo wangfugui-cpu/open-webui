@@ -270,7 +270,10 @@ async def stop_item_tasks(redis: Redis, item_id: str):
     """
     Stop all tasks associated with a specific item ID.
     """
-    task_ids = await list_task_ids_by_item_id(redis, item_id)
+    # ``cleanup_task`` removes the finished task from the in-memory list.
+    # Iterate a snapshot: otherwise cancelling the first task mutates the
+    # list under this loop and leaves every second task running.
+    task_ids = list(await list_task_ids_by_item_id(redis, item_id))
     if not task_ids:
         return {'status': True, 'message': f'No tasks found for item {item_id}.'}
 

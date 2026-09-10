@@ -38,6 +38,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.sql import case, exists
 from sqlalchemy.sql.expression import bindparam
@@ -593,6 +594,34 @@ class ChatTable:
                 log.warning(f'Failed to write initial messages to chat_message table: {e}')
 
             return ChatModel.model_validate(chat_item) if chat_item else None
+
+    async def ensure_new_chat(
+        self,
+        id: str,
+        user_id: str,
+        form_data: ChatForm,
+    ) -> tuple[ChatModel | None, bool]:
+        """Create a new chat once, or safely resume its durable initialization.
+
+        A durable operation reserves its chat id before the chat row is
+        written.  A retry after a crash in that small window must not turn the
+        second insert into a 500, nor accept a row owned by another user.
+        """
+        existing = await self.get_chat_by_id(id)
+        if existing is not None:
+            if existing.user_id != user_id:
+                raise ValueError('chat id is already owned by another user')
+            return existing, False
+
+        try:
+            return await self.insert_new_chat(id, user_id, form_data), True
+        except IntegrityError:
+            # A concurrent owner may have committed between the read and
+            # insert.  The primary-key constraint is the final authority.
+            existing = await self.get_chat_by_id(id)
+            if existing is None or existing.user_id != user_id:
+                raise
+            return existing, False
 
     async def get_internal_chat_ids_by_parent_id(self, parent_chat_id: str, user_id: str) -> list[str]:
         async with get_async_db_context() as session:
@@ -1290,12 +1319,23 @@ class ChatTable:
             chat = chat_item.chat or {}
             history = chat.get('history', {})
 
-            message_files = []
+            if message_id not in history.get('messages', {}):
+                return None
 
-            if message_id in history.get('messages', {}):
-                message_files = history['messages'][message_id].get('files', [])
-                message_files = message_files + files
-                history['messages'][message_id]['files'] = message_files
+            message_files = history['messages'][message_id].get('files', [])
+            existing_file_ids = {
+                item.get('id') for item in message_files if isinstance(item, dict) and item.get('id')
+            }
+            new_files = []
+            for item in files:
+                file_id = item.get('id') if isinstance(item, dict) else None
+                if file_id and file_id in existing_file_ids:
+                    continue
+                if file_id:
+                    existing_file_ids.add(file_id)
+                new_files.append(item)
+            message_files = message_files + new_files
+            history['messages'][message_id]['files'] = message_files
 
             # Written here rather than through update_chat_by_id: with session sharing off that opens a second
             # connection, which then blocks on the lock this one holds.

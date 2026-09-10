@@ -11,6 +11,7 @@ from open_webui.models.auths import Auth
 from open_webui.models.calendar import Calendar, CalendarEvent, CalendarEventAttendee  # noqa: F401
 from open_webui.models.chat_messages import ChatMessage  # noqa: F401
 from open_webui.models.chats import Chat  # noqa: F401
+from open_webui.models.operations import ChatOperation, ToolExecution  # noqa: F401
 from sqlalchemy import create_engine, engine_from_config, pool
 
 alembic_config = alembic.context.config

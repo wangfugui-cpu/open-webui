@@ -684,24 +684,25 @@ async def get_builtin_tools(
     ):
         builtin_functions.extend([search_web, fetch_url])
 
-    # Add image generation/edit tools if builtin category enabled,
-    # globally enabled, and allowed by model capability.
+    # Add image generation/edit tools if the builtin category is enabled and
+    # allowed by model capability. The providers have independent switches:
+    # editing can stay available while creation is disabled, and a disabled
+    # editor remains visible beside creation so it can fail closed rather than
+    # silently turn an edit into a new image.
     if (
         is_builtin_tool_enabled('image_generation')
-        and config.get('image_generation.enable')
         and get_model_capability('image_generation')
         and features.get('image_generation')
         and await has_user_permission('image_generation')
     ):
-        builtin_functions.append(generate_image)
-    if (
-        is_builtin_tool_enabled('image_generation')
-        and config.get('images.edit.enable')
-        and get_model_capability('image_generation')
-        and features.get('image_generation')
-        and await has_user_permission('image_generation')
-    ):
-        builtin_functions.append(edit_image)
+        if config.get('image_generation.enable'):
+            builtin_functions.append(generate_image)
+
+        if config.get('images.edit.enable') or config.get('image_generation.enable'):
+            # Keep edit_image available when the edit provider is disabled but
+            # creation is enabled. The tool returns a precise unavailable error
+            # instead of silently creating a replacement image.
+            builtin_functions.append(edit_image)
 
     # Add code interpreter tool if builtin category enabled,
     # globally enabled, and allowed by model capability.
@@ -778,6 +779,7 @@ async def get_builtin_tools(
                 '__event_call__': extra_params.get('__event_call__'),
                 '__metadata__': extra_params.get('__metadata__'),
                 '__files__': chat_files,
+                '__current_user_image_refs__': extra_params.get('__current_user_image_refs__', []),
                 '__chat_id__': extra_params.get('__chat_id__'),
                 '__message_id__': extra_params.get('__message_id__'),
                 '__model_knowledge__': model_knowledge,

@@ -596,15 +596,16 @@ try:
 except (ValueError, TypeError):
     AIOHTTP_CLIENT_TIMEOUT = 300
 
-# Optional between-chunks idle cap for streaming aiohttp requests.
-AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = os.getenv('AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT', '')
-if AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT == '':
-    AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = None
-else:
-    try:
-        AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = int(AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT)
-    except (ValueError, TypeError):
-        AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = None
+# Bound an upstream stream which stops producing data.  A model request may
+# already have reached its provider at that point, so the operation layer
+# records the result as unknown instead of silently retrying it.  Deployments
+# that need a different interval can still override this setting (or disable
+# it explicitly with a non-positive value).
+_stream_idle_timeout_raw = os.getenv('AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT', '120')
+try:
+    AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = int(_stream_idle_timeout_raw)
+except (ValueError, TypeError):
+    AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = 120
 
 if AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT is not None and AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT <= 0:
     AIOHTTP_CLIENT_STREAM_IDLE_TIMEOUT = None
