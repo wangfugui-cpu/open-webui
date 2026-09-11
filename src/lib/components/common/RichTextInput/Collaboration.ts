@@ -3,6 +3,7 @@ import {
 	ySyncPlugin,
 	yCursorPlugin,
 	yUndoPlugin,
+	yUndoPluginKey,
 	undo,
 	redo,
 	prosemirrorJSONToYDoc
@@ -34,6 +35,10 @@ export type EditorContentGetter = () => {
 	html: string;
 	json: unknown;
 };
+
+// Initial note hydration is a transport concern, not a user edit. Keep it
+// distinguishable from a local ProseMirror edit while it is applied to Yjs.
+const INITIAL_CONTENT_ORIGIN = 'initial-content';
 
 // Custom Yjs Socket.IO provider
 export class SocketIOCollaborationProvider {
@@ -96,11 +101,24 @@ export class SocketIOCollaborationProvider {
 
 		if (typeof this.initialContent === 'string') {
 			this.editor.commands.setContent(this.initialContent);
+			this.clearUndoHistory();
 			return;
 		}
 
 		const doc = prosemirrorJSONToYDoc(this.editor.schema, this.initialContent);
-		Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(doc));
+		Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(doc), INITIAL_CONTENT_ORIGIN);
+		this.clearUndoHistory();
+	}
+
+	private clearUndoHistory() {
+		if (!this.editor) return;
+
+		// ySyncPlugin turns the initial Yjs update into a ProseMirror transaction.
+		// If that transaction remains in the undo manager, the first Undo can erase
+		// the entire persisted note and the collaboration autosave then persists the
+		// empty document. Clear only the initialization history; subsequent local
+		// edits continue to use the normal y-prosemirror undo manager.
+		yUndoPluginKey.getState(this.editor.state)?.undoManager.clear();
 	}
 
 	private joinDocument() {
