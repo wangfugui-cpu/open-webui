@@ -38,7 +38,7 @@
 		pinnedNotes
 	} from '$lib/stores';
 
-	import { downloadPdf } from './utils';
+	import { downloadNoteExport, downloadPdf } from './utils';
 
 	import Chat from '$lib/components/chat/Chat.svelte';
 
@@ -776,9 +776,12 @@ ${content}
 		if (type === 'txt') {
 			const blob = new Blob([note.data.content.md], { type: 'text/plain' });
 			saveAs(blob, `${note.title}.txt`);
-		} else if (type === 'md') {
-			const blob = new Blob([note.data.content.md], { type: 'text/markdown' });
-			saveAs(blob, `${note.title}.md`);
+		} else if (type === 'md' || type === 'docx') {
+			try {
+				await downloadNoteExport(localStorage.token, note, type);
+			} catch (error) {
+				toast.error(`${error}`);
+			}
 		} else if (type === 'pdf') {
 			try {
 				await downloadPdf(note);

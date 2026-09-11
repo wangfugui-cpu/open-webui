@@ -41,7 +41,7 @@
 		getPinnedNoteList
 	} from '$lib/apis/notes';
 	import { capitalizeFirstLetter, copyToClipboard, formatNumber, getTimeRange } from '$lib/utils';
-	import { downloadPdf, createNoteHandler } from './utils';
+	import { downloadNoteExport, downloadPdf, createNoteHandler } from './utils';
 
 	import EllipsisHorizontal from '../icons/EllipsisHorizontal.svelte';
 	import DeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
@@ -98,9 +98,12 @@
 		if (type === 'txt') {
 			const blob = new Blob([note.data.content.md], { type: 'text/plain' });
 			saveAs(blob, `${note.title}.txt`);
-		} else if (type === 'md') {
-			const blob = new Blob([note.data.content.md], { type: 'text/markdown' });
-			saveAs(blob, `${note.title}.md`);
+		} else if (type === 'md' || type === 'docx') {
+			try {
+				await downloadNoteExport(localStorage.token, note, type);
+			} catch (error) {
+				toast.error(`${error}`);
+			}
 		} else if (type === 'pdf') {
 			try {
 				await downloadPdf(note);

@@ -72,6 +72,15 @@
 				<button
 					class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
 					on:click={() => {
+						onDownload('docx');
+					}}
+				>
+					<div class="flex items-center line-clamp-1">{$i18n.t('Word document (.docx)')}</div>
+				</button>
+
+				<button
+					class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-[0.8125rem] hover:text-gray-900 dark:hover:text-gray-100"
+					on:click={() => {
 						onDownload('pdf');
 					}}
 				>

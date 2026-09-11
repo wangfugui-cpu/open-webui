@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { toast } from 'svelte-sonner';
 
+import { WEBUI_API_BASE_URL } from '$lib/constants';
 import { createNewNote } from '$lib/apis/notes';
 
 export const downloadPdf = async (note) => {
@@ -105,6 +106,18 @@ export const downloadPdf = async (note) => {
 	}
 
 	pdf.save(`${note.title}.pdf`);
+};
+
+export const downloadNoteExport = async (token: string, note, format: 'md' | 'docx') => {
+	const response = await fetch(`${WEBUI_API_BASE_URL}/notes/${note.id}/download?format=${format}`, {
+		headers: { authorization: `Bearer ${token}` }
+	});
+
+	if (!response.ok) {
+		throw new Error('Unable to download this note');
+	}
+
+	saveAs(await response.blob(), `${note.title || 'note'}.${format}`);
 };
 
 export const createNoteHandler = async (title: string, md?: string, html?: string) => {

@@ -1,8 +1,14 @@
+import asyncio
 import logging
+import re
+from io import BytesIO
+from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from open_webui.config import (
     BYPASS_ADMIN_ACCESS_CONTROL,
     ENABLE_ADMIN_CHAT_ACCESS,
@@ -14,6 +20,7 @@ from open_webui.internal.db import get_async_session
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.chats import ChatForm, ChatResponse, Chats
 from open_webui.models.config import Config
+from open_webui.models.files import Files
 from open_webui.models.groups import Groups
 from open_webui.models.notes import (
     NoteForm,
@@ -30,13 +37,41 @@ from open_webui.utils.access_control import (
     has_public_read_access_grant,
     has_public_write_access_grant,
 )
+from open_webui.utils.access_control.files import has_access_to_file
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.note_exports import internal_note_image_ids, render_note_docx
+from open_webui.storage.provider import Storage
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_EXPORT_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def _download_filename(title: str, extension: str) -> str:
+    filename = _EXPORT_FILENAME.sub('_', (title or 'note').strip()) or 'note'
+    return quote(f'{filename}.{extension}')
+
+
+async def _note_export_images(note: NoteModel, user, db: AsyncSession) -> list[tuple[str, bytes]]:
+    markdown = ((note.data or {}).get('content') or {}).get('md') or ''
+    images: list[tuple[str, bytes]] = []
+    for alt_text, file_id in internal_note_image_ids(markdown):
+        file = await Files.get_file_by_id(file_id, db=db)
+        if not file or not (file.meta or {}).get('content_type', '').startswith('image/'):
+            continue
+        if file.user_id != user.id and user.role != 'admin' and not await has_access_to_file(file.id, 'read', user, db=db):
+            continue
+        try:
+            image_path = await asyncio.to_thread(Storage.get_file, file.path)
+            image_bytes = await asyncio.to_thread(Path(image_path).read_bytes)
+            images.append((alt_text, image_bytes))
+        except OSError:
+            log.warning('Unable to read note export image file_id=%s', file.id)
+    return images
 
 
 def _truncate_note_data(data: Optional[dict], max_length: int = 1000) -> Optional[dict]:
@@ -301,6 +336,45 @@ async def get_note_by_id(
     return NoteResponse(
         **{**note.model_dump(), 'is_pinned': note.id in pinned_note_ids},
         write_access=write_access,
+    )
+
+
+@router.get('/{id}/download')
+async def download_note_by_id(
+    id: str,
+    format: str = 'md',
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Download a private note only after the same read check as its detail page."""
+    if format not in {'md', 'docx'}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unsupported export format')
+    if user.role != 'admin' and not await has_permission(
+        user.id, 'features.notes', await Config.get('user.permissions'), db=db
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERROR_MESSAGES.UNAUTHORIZED)
+
+    note = await Notes.get_note_by_id(id, db=db)
+    if not note:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+    if user.role != 'admin' and user.id != note.user_id and not await AccessGrants.has_access(
+        user_id=user.id, resource_type='note', resource_id=note.id, permission='read', db=db
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.DEFAULT())
+
+    markdown = ((note.data or {}).get('content') or {}).get('md') or ''
+    if format == 'md':
+        payload = markdown.encode('utf-8')
+        media_type = 'text/markdown; charset=utf-8'
+    else:
+        payload = render_note_docx(note.title, markdown, await _note_export_images(note, user, db))
+        media_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
+    filename = _download_filename(note.title, format)
+    return StreamingResponse(
+        BytesIO(payload),
+        media_type=media_type,
+        headers={'Content-Disposition': f"attachment; filename*=UTF-8''{filename}"},
     )
 
 
