@@ -98,6 +98,8 @@
 	let editor = null;
 	let note = null;
 	let downloadedNoteExport = '';
+	let initializedNoteId: string | null = null;
+	let initializedDownloadFormat: 'md' | 'docx' | null = null;
 
 	const newNote = {
 		title: '',
@@ -329,7 +331,9 @@
 		return true;
 	};
 
-	$: if (id) {
+	$: if (id && (id !== initializedNoteId || downloadFormat !== initializedDownloadFormat)) {
+		initializedNoteId = id;
+		initializedDownloadFormat = downloadFormat;
 		init();
 	}
 
