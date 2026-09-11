@@ -93,9 +93,11 @@
 	import ChatBubbleOval from '../icons/ChatBubbleOval.svelte';
 
 	export let id: null | string = null;
+	export let downloadFormat: 'md' | 'docx' | null = null;
 
 	let editor = null;
 	let note = null;
+	let downloadedNoteExport = '';
 
 	const newNote = {
 		title: '',
@@ -195,6 +197,18 @@
 			});
 			$socket?.off('events:note', noteEventHandler);
 			$socket?.on('events:note', noteEventHandler);
+
+			const requestedDownloadFormat = downloadFormat;
+			const exportKey = requestedDownloadFormat ? `${id}:${requestedDownloadFormat}` : '';
+			if (exportKey && requestedDownloadFormat && downloadedNoteExport !== exportKey) {
+				downloadedNoteExport = exportKey;
+				try {
+					await downloadNoteExport(localStorage.token, note, requestedDownloadFormat);
+				} catch (error) {
+					downloadedNoteExport = '';
+					toast.error(`${error}`);
+				}
+			}
 		} else {
 			goto('/');
 			return;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 from open_webui.models.notes import NoteModel
 from open_webui.models.users import UserModel
 from open_webui.routers import notes as notes_router
+from open_webui.tools import builtin
 
 
 def _user(user_id: str) -> UserModel:
@@ -109,3 +111,53 @@ async def test_docx_export_keeps_only_authorized_internal_images(monkeypatch):
         assert any(name.startswith('word/media/') for name in archive.namelist())
     document = Document(BytesIO(exported))
     assert '编辑后的蓝杯' in '\n'.join(paragraph.text for paragraph in document.paragraphs)
+
+
+def test_docx_export_turns_markdown_schedule_into_a_real_table():
+    from open_webui.utils.note_exports import render_note_docx
+
+    rendered = render_note_docx(
+        '安排说明',
+        '| 时间 | 事项 |\n| --- | --- |\n| 周一 | 收集资料 |\n| 周二 | 确认冲突 |',
+    )
+    document = Document(BytesIO(rendered))
+
+    assert len(document.tables) == 1
+    assert [cell.text for cell in document.tables[0].rows[0].cells] == ['时间', '事项']
+    assert [cell.text for cell in document.tables[0].rows[1].cells] == ['周一', '收集资料']
+
+
+@pytest.mark.asyncio
+async def test_export_note_tool_returns_private_product_download_link(monkeypatch):
+    note = _note()
+
+    async def get_note(*_args, **_kwargs):
+        return note
+
+    async def read_access(_note, user):
+        return user.get('id') == 'owner'
+
+    monkeypatch.setattr(builtin.Notes, 'get_note_by_id', get_note)
+    monkeypatch.setattr(builtin, '_has_read_access_to_note', read_access)
+
+    exported = await builtin.export_note(
+        'private-note',
+        'docx',
+        __request__=object(),
+        __user__={'id': 'owner', 'role': 'user'},
+    )
+    assert json.loads(exported) == {
+        'status': 'success',
+        'id': 'private-note',
+        'title': '冲突整理说明',
+        'format': 'docx',
+        'download_url': '/notes/private-note?download=docx',
+    }
+
+    denied = await builtin.export_note(
+        'private-note',
+        'docx',
+        __request__=object(),
+        __user__={'id': 'other-user', 'role': 'user'},
+    )
+    assert json.loads(denied)['code'] == 'access_denied'

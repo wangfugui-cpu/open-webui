@@ -112,6 +112,22 @@ async def _has_write_access_to_note(note, user_id: str) -> bool:
     )
 
 
+async def _has_read_access_to_note(note, user: dict) -> bool:
+    if user.get('role') == 'admin' or note.user_id == user.get('id'):
+        return True
+
+    from open_webui.models.access_grants import AccessGrants
+
+    user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user.get('id', ''))]
+    return await AccessGrants.has_access(
+        user_id=user.get('id', ''),
+        resource_type='note',
+        resource_id=note.id,
+        permission='read',
+        user_group_ids=set(user_group_ids),
+    )
+
+
 async def _emit_note_updated(request: Request, user: dict, note) -> None:
     await sio.emit('events:note', note.model_dump(), to=f'note:{note.id}')
     await publish_event(
@@ -1300,23 +1316,7 @@ async def view_note(
         if not note:
             return JSONCodec.dumps({'error': 'Note not found'})
 
-        # Check access permission
-        user_id = __user__.get('id')
-        user_group_ids = [group.id for group in await Groups.get_groups_by_member_id(user_id)]
-
-        from open_webui.models.access_grants import AccessGrants
-
-        if (
-            __user__.get('role') != 'admin'
-            and note.user_id != user_id
-            and not await AccessGrants.has_access(
-                user_id=user_id,
-                resource_type='note',
-                resource_id=note.id,
-                permission='read',
-                user_group_ids=set(user_group_ids),
-            )
-        ):
+        if not await _has_read_access_to_note(note, __user__):
             return JSONCodec.dumps({'error': 'Access denied'})
 
         # Extract markdown content
@@ -1346,7 +1346,12 @@ async def write_note(
     __user__: dict = None,
 ) -> str:
     """
-    Create a new note with the given title and content.
+    Create and persist a new private note with the given title and Markdown content.
+
+    Use this when the user explicitly asks to save, retain, preserve, or create
+    a result for later editing. Do not say a result was saved unless this tool
+    returns status "success". For edits to an existing note, use
+    replace_note_content instead of creating a duplicate.
 
     :param title: The title of the new note
     :param content: The markdown content for the note
@@ -1379,6 +1384,7 @@ async def write_note(
                 'status': 'success',
                 'id': new_note.id,
                 'title': new_note.title,
+                'note_url': f'/notes/{new_note.id}',
                 'created_at': new_note.created_at,
             },
             ensure_ascii=False,
@@ -1397,7 +1403,11 @@ async def replace_note_content(
     __user__: dict = None,
 ) -> str:
     """
-    Update an existing note by replacing the whole markdown content or applying range operations.
+    Update an existing saved note by replacing its Markdown content or applying range operations.
+
+    Use this when the user asks to continue modifying a previously saved
+    result. Do not create another note merely because the user asked for a
+    revision.
 
     :param note_id: The ID of the note to update
     :param content: The new markdown content for a whole-note update
@@ -1549,6 +1559,50 @@ async def replace_note_content(
         )
     except Exception as e:
         log.exception(f'replace_note_content error: {e}')
+        return JSONCodec.dumps({'error': str(e), 'code': 'unexpected_error'})
+
+
+async def export_note(
+    note_id: str,
+    format: Literal['md', 'docx'] = 'docx',
+    __request__: Request = None,
+    __user__: dict = None,
+) -> str:
+    """Prepare a private saved note for the user to download.
+
+    Use this only after a saved note exists and the user explicitly asks to
+    download or export it.  Return the ``download_url`` to the user; the
+    product page uses the signed-in user's session to fetch the file.  Do not
+    claim that a file was delivered if this tool returns an error.
+
+    :param note_id: The saved note to export
+    :param format: ``md`` for Markdown or ``docx`` for a Word document
+    :return: JSON with a private in-product download URL
+    """
+    if __request__ is None:
+        return JSONCodec.dumps({'error': 'Request context not available'})
+    if not __user__:
+        return JSONCodec.dumps({'error': 'User context not available'})
+
+    try:
+        note = await Notes.get_note_by_id(note_id)
+        if not note:
+            return JSONCodec.dumps({'error': 'Note not found', 'code': 'not_found'})
+        if not await _has_read_access_to_note(note, __user__):
+            return JSONCodec.dumps({'error': 'Access denied', 'code': 'access_denied'})
+
+        return JSONCodec.dumps(
+            {
+                'status': 'success',
+                'id': note.id,
+                'title': note.title,
+                'format': format,
+                'download_url': f'/notes/{note.id}?download={format}',
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        log.exception(f'export_note error: {e}')
         return JSONCodec.dumps({'error': str(e), 'code': 'unexpected_error'})
 
 

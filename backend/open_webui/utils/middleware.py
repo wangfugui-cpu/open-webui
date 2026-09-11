@@ -3258,6 +3258,18 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 if name not in tools_dict:
                     tools_dict[name] = tool_dict
 
+            note_tool_names = {'write_note', 'replace_note_content', 'export_note'} & builtin_tools.keys()
+            if note_tool_names:
+                form_data['messages'] = add_or_update_system_message(
+                    'When the user explicitly asks to save, retain, or preserve a result for later editing, '
+                    'call write_note and report it saved only after that tool succeeds. When the user asks to '
+                    'modify a saved result, use replace_note_content on the existing note instead of creating '
+                    'a duplicate. When the user asks to download a saved result, call export_note and present '
+                    'its download_url. If a note tool fails, state that it was not saved or exported.',
+                    form_data['messages'],
+                    append=True,
+                )
+
         if tools_dict:
             # Always store resolved tools in metadata so downstream consumers
             # (e.g. pipe functions) can access all tools including MCP and builtins.

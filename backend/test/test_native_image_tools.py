@@ -67,7 +67,9 @@ async def test_legacy_image_http_endpoints_fail_closed_without_explicit_opt_in(m
     assert edit_error.value.status_code == 403
 
 
-def _configure_native_payload_dependencies(monkeypatch, *, image_edit_enabled: bool) -> None:
+def _configure_native_payload_dependencies(
+    monkeypatch, *, image_edit_enabled: bool, notes_enabled: bool = False
+) -> None:
     async def get_config(key, default=None):
         return {
             'images.edit.enable': image_edit_enabled,
@@ -82,7 +84,7 @@ def _configure_native_payload_dependencies(monkeypatch, *, image_edit_enabled: b
             'image_generation.enable': True,
             'images.edit.enable': image_edit_enabled,
             'code_interpreter.enable': False,
-            'notes.enable': False,
+            'notes.enable': notes_enabled,
             'channels.enable': False,
             'automations.enable': False,
             'calendar.enable': False,
@@ -323,6 +325,47 @@ async def test_persistent_page_request_rebuilds_current_image_and_executes_nativ
 
 
 @pytest.mark.asyncio
+async def test_native_request_carries_note_tools_and_save_instruction_for_ordinary_user(monkeypatch) -> None:
+    _configure_native_payload_dependencies(monkeypatch, image_edit_enabled=False, notes_enabled=True)
+    model = _native_model()
+    request = _native_request(model)
+    user = _native_test_user()
+    current_user_message = {
+        'id': 'save-note-message',
+        'role': 'user',
+        'content': '把这份整理保存下来，方便继续修改',
+        'files': [],
+    }
+
+    form_data, metadata, _events = await middleware_utils.process_chat_payload(
+        request,
+        {
+            'model': model['id'],
+            'messages': [current_user_message.copy()],
+            'features': {'image_generation': False},
+        },
+        user,
+        {
+            'chat_id': '',
+            'user_message': current_user_message,
+            'message_id': 'save-note-assistant-message',
+            'session_id': 'browser-session',
+            'params': {'function_calling': 'native'},
+        },
+        model,
+    )
+
+    assert {'write_note', 'replace_note_content', 'export_note'} <= metadata['tools'].keys()
+    assert {'write_note', 'replace_note_content', 'export_note'} <= {
+        tool['function']['name'] for tool in form_data['tools']
+    }
+    assert any(
+        message.get('role') == 'system' and 'call write_note' in str(message.get('content'))
+        for message in form_data['messages']
+    )
+
+
+@pytest.mark.asyncio
 async def test_temporary_page_request_allows_a_new_image_unrelated_to_current_attachment(monkeypatch) -> None:
     """A current upload is context, not an unconditional instruction to edit it."""
     _configure_native_payload_dependencies(monkeypatch, image_edit_enabled=False)
@@ -450,6 +493,44 @@ async def test_native_image_tools_are_available_without_forcing_a_generation(mon
 
     assert {'generate_image', 'edit_image'} <= tools.keys()
     # Registering the tools only exposes choices to the model. It does not execute either tool.
+
+
+@pytest.mark.asyncio
+async def test_native_note_tools_include_private_export_for_authorized_users(monkeypatch) -> None:
+    async def get_many(*_keys):
+        return {
+            'web.search.enable': False,
+            'image_generation.enable': False,
+            'images.edit.enable': False,
+            'code_interpreter.enable': False,
+            'notes.enable': True,
+            'channels.enable': False,
+            'automations.enable': False,
+            'calendar.enable': False,
+            'ui.enable_user_webhooks': False,
+            'subagents.enable': False,
+            'subagents.background_enabled': False,
+        }
+
+    async def get_config(_key, _default=None):
+        return {}
+
+    async def permitted(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(tools_utils.Config, 'get_many', get_many)
+    monkeypatch.setattr(tools_utils.Config, 'get', get_config)
+    monkeypatch.setattr(tools_utils, 'has_permission', permitted)
+
+    tools = await tools_utils.get_builtin_tools(
+        SimpleNamespace(state=SimpleNamespace(internal=False, direct=False)),
+        {'__user__': {'id': 'ordinary-user', 'role': 'user'}, '__metadata__': {}},
+        features={},
+        model={'info': {'meta': {'capabilities': {}}}},
+    )
+
+    assert {'search_notes', 'view_note', 'write_note', 'replace_note_content', 'export_note'} <= tools.keys()
+    assert tools['export_note']['spec']['name'] == 'export_note'
 
 
 @pytest.mark.asyncio

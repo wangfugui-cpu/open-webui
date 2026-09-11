@@ -57,6 +57,7 @@ from open_webui.tools.builtin import (
     delete_memory,
     edit_image,
     execute_code,
+    export_note,
     fetch_url,
     generate_image,
     get_current_timestamp,
@@ -719,7 +720,7 @@ async def get_builtin_tools(
     if is_note_chat or (
         is_builtin_tool_enabled('notes') and config.get('notes.enable') and await has_user_permission('notes')
     ):
-        builtin_functions.extend([search_notes, view_note, write_note, replace_note_content])
+        builtin_functions.extend([search_notes, view_note, write_note, replace_note_content, export_note])
 
     # Channels tools - search channels and messages
     if is_builtin_tool_enabled('channels') and config.get('channels.enable') and await has_user_permission('channels'):

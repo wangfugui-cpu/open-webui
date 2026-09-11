@@ -11,6 +11,9 @@
 	import NoteEditor from '$lib/components/notes/NoteEditor.svelte';
 
 	let loaded = false;
+	$: downloadFormat = ['md', 'docx'].includes($page.url.searchParams.get('download') ?? '')
+		? ($page.url.searchParams.get('download') as 'md' | 'docx')
+		: null;
 
 	onMount(async () => {
 		loaded = true;
@@ -22,6 +25,6 @@
 		id="note-container"
 		class="w-full h-full {$showSidebar ? 'md:max-w-[calc(100%-var(--sidebar-width))]' : ''}"
 	>
-		<NoteEditor id={$page.params.id} />
+		<NoteEditor id={$page.params.id} {downloadFormat} />
 	</div>
 {/if}
