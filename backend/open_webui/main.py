@@ -296,6 +296,20 @@ async def emit_chat_list_event(metadata: dict, chat_id: str):
         await event_emitter({'type': 'chat:list', 'data': {'chat_id': chat_id, 'folder_id': folder_id}})
 
 
+def _has_output_text(parts: list[dict] | None) -> bool:
+    return any(isinstance(part, dict) and str(part.get('text') or '').strip() for part in parts or [])
+
+
+def _has_delivered_output_item(item: dict) -> bool:
+    if item.get('files'):
+        return True
+    if item.get('type') == 'message':
+        return _has_output_text(item.get('content'))
+    if item.get('type') == 'function_call_output' and item.get('status') == 'completed':
+        return _has_output_text(item.get('output'))
+    return False
+
+
 def _has_delivered_assistant_result(message: dict | None) -> bool:
     """Whether a persisted assistant message contains an actual user result.
 
@@ -313,18 +327,7 @@ def _has_delivered_assistant_result(message: dict | None) -> bool:
     if message.get('files'):
         return True
 
-    for item in message.get('output') or []:
-        if item.get('files'):
-            return True
-        if item.get('type') == 'message':
-            for part in item.get('content') or []:
-                if isinstance(part, dict) and str(part.get('text') or '').strip():
-                    return True
-        if item.get('type') == 'function_call_output' and item.get('status') == 'completed':
-            for part in item.get('output') or []:
-                if isinstance(part, dict) and str(part.get('text') or '').strip():
-                    return True
-    return False
+    return any(_has_delivered_output_item(item) for item in message.get('output') or [])
 
 
 async def _assert_persisted_chat_delivery(metadata: dict) -> None:
