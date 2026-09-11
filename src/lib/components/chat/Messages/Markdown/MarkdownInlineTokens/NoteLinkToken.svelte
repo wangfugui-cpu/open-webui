@@ -3,7 +3,9 @@
 	import { goto } from '$app/navigation';
 	import { getNoteById } from '$lib/apis/notes';
 	import { getUserInfoById } from '$lib/apis/users';
+	import { downloadNoteExport } from '$lib/components/notes/utils';
 	import { capitalizeFirstLetter } from '$lib/utils';
+	import { toast } from 'svelte-sonner';
 
 	const i18n = getContext('i18n');
 
@@ -44,12 +46,24 @@
 <button
 	class="relative group py-2 px-3 w-60 flex flex-col bg-white dark:bg-gray-850 border border-gray-50/30 dark:border-gray-800/30 rounded-xl text-left cursor-pointer"
 	type="button"
-	on:click|preventDefault|stopPropagation={() => {
+	on:click|preventDefault|stopPropagation={async () => {
 		try {
 			const url = new URL(href, window.location.origin);
+			const format = url.searchParams.get('download');
+
+			if (format === 'md' || format === 'docx') {
+				const note = await getNoteById(localStorage.token, noteId);
+				if (!note) {
+					throw new Error($i18n.t('Unable to download this note'));
+				}
+
+				await downloadNoteExport(localStorage.token, note, format);
+				return;
+			}
+
 			goto(url.pathname + url.search + url.hash);
-		} catch {
-			// fallback
+		} catch (error) {
+			toast.error(`${error}`);
 		}
 	}}
 >
