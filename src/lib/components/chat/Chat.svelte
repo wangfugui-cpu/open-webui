@@ -3526,15 +3526,17 @@
 
 	const getFeatures = () => {
 		let features = {};
+		const canUseImageGeneration =
+			$config?.features?.enable_image_generation &&
+			($user?.role === 'admin' || $user?.permissions?.features?.image_generation);
 
 		if ($config?.features)
 			features = {
 				voice: $showCallOverlay,
-				image_generation:
-					$config?.features?.enable_image_generation &&
-					($user?.role === 'admin' || $user?.permissions?.features?.image_generation)
-						? imageGenerationEnabled
-						: false,
+				// Image tools are product capabilities, not a manual mode. Dynamic gateway
+				// models do not carry defaultFeatureIds, so using the composer toggle here
+				// silently removed native image tools from an otherwise permitted request.
+				image_generation: Boolean(canUseImageGeneration),
 				code_interpreter:
 					$config?.features?.enable_code_interpreter &&
 					($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
