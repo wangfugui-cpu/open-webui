@@ -3263,6 +3263,21 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             # (e.g. pipe functions) can access all tools including MCP and builtins.
             metadata['tools'] = tools_dict
 
+            # Keep a privacy-safe boundary record for durable operations. It
+            # intentionally contains only tool names and mode flags: no user
+            # prompt, file URL, parameters, headers, or provider credential.
+            # This lets a failed native-tool request be located without
+            # mistaking an HTTP 200 for evidence that a tool was available.
+            if metadata.get('operation_id'):
+                log.info(
+                    'Operation %s dispatches native tools: model=%s mode=%s image_feature=%s tools=%s',
+                    metadata['operation_id'],
+                    form_data.get('model'),
+                    metadata.get('params', {}).get('function_calling', 'native'),
+                    bool(features.get('image_generation')),
+                    sorted(tools_dict),
+                )
+
             if metadata.get('params', {}).get('function_calling') != 'legacy':
                 # If the function calling is native, then call the tools function calling handler
                 form_data['tools'] = [
