@@ -223,6 +223,15 @@ export class SocketIOCollaborationProvider {
 		this.doc.on('update', async (update, origin) => {
 			if (this.editor && origin !== 'server' && this.isConnected) {
 				await tick(); // Ensure the DOM is updated before sending
+
+				// ySyncPlugin applies the ProseMirror transaction after Yjs has
+				// emitted this update. Clearing synchronously in applyInitialContent
+				// was therefore too early: the initialization transaction could be
+				// recorded afterwards and the first Undo erased the whole note.
+				if (origin === INITIAL_CONTENT_ORIGIN) {
+					this.clearUndoHistory();
+				}
+
 				this.socket.emit('ydoc:document:update', {
 					document_id: this.documentId,
 					user_id: this.user?.id,
