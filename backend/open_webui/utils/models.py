@@ -32,6 +32,30 @@ log = logging.getLogger(__name__)
 BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
 
 
+async def has_sub2api_model_access(model: dict, user: UserModel) -> bool:
+    """Allow only models discovered through the caller's own Sub2API session.
+
+    Sub2API is the authorization source for a key-login user: model discovery
+    and completion both use that encrypted per-user credential. Such provider
+    models have no local ``models`` row, so the generic local-model ACL would
+    otherwise hide every model on a fresh Open WebUI installation. Do not
+    treat every unregistered model as accessible; require both the Sub2API
+    identity marker and the configured Sub2API connection for this model.
+    """
+    if not openai.is_sub2api_key_login_user(user):
+        return False
+
+    url_idx = model.get('urlIdx')
+    if isinstance(url_idx, bool) or not isinstance(url_idx, int):
+        return False
+
+    _, api_base_urls, _, _ = await openai.get_openai_runtime_config()
+    return (
+        0 <= url_idx < len(api_base_urls)
+        and openai.is_sub2api_key_login_connection(api_base_urls[url_idx])
+    )
+
+
 async def fetch_ollama_models(request: Request, user: UserModel = None):
     raw_ollama_models = await ollama.get_all_models(request, user=user)
     return [
@@ -463,6 +487,9 @@ async def check_model_access(user, model, model_info=None, db=None):
         ):
             raise Exception('Model not found')
     else:
+        if await has_sub2api_model_access(model, user):
+            return
+
         # Callers that already fetched the row (chat completion entry) pass it in
         if model_info is None or model_info.id != model.get('id'):
             model_info = await Models.get_model_by_id(model.get('id'), db=db)
@@ -522,6 +549,10 @@ async def get_filtered_models(models, user, db=None):
 
         filtered_models = []
         for model in models:
+            if await has_sub2api_model_access(model, user):
+                filtered_models.append(model)
+                continue
+
             if model.get('arena'):
                 meta = model.get('info', {}).get('meta', {})
                 access_grants = meta.get('access_grants', [])

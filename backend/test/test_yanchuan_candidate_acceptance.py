@@ -27,6 +27,7 @@ from open_webui.routers import auths as auths_router
 from open_webui.routers.chats import overlay_response_streams
 from open_webui.tools import builtin
 from open_webui.utils import middleware as middleware_utils
+from open_webui.utils import models as model_utils
 from open_webui.utils import tools as tools_utils
 
 
@@ -80,6 +81,31 @@ async def test_sub2api_key_login_never_uses_an_administrator_default_role(monkey
     )
 
     assert captured['role'] == 'user'
+
+
+@pytest.mark.asyncio
+async def test_sub2api_key_user_can_only_see_models_from_its_own_gateway_connection(monkeypatch):
+    """A fresh Open WebUI DB must not hide a key owner's discovered models."""
+    user = _user('sub2api-user', oauth={'sub2api': {'subject': '2'}})
+    own_gateway_model = {'id': 'gpt-5.6-terra', 'urlIdx': 0}
+    other_unregistered_model = {'id': 'another-provider-model', 'urlIdx': 1}
+
+    async def runtime_config():
+        return True, ['http://sub2api:8080/v1', 'https://other.example/v1'], ['', ''], {}
+
+    monkeypatch.setattr(model_utils.openai, 'get_openai_runtime_config', runtime_config)
+    monkeypatch.setattr(
+        model_utils.openai,
+        'is_sub2api_key_login_connection',
+        lambda url: url == 'http://sub2api:8080/v1',
+    )
+
+    visible = await model_utils.get_filtered_models([own_gateway_model, other_unregistered_model], user)
+
+    assert visible == [own_gateway_model]
+    await model_utils.check_model_access(user, own_gateway_model)
+    with pytest.raises(Exception, match='Model not found'):
+        await model_utils.check_model_access(user, other_unregistered_model)
 
 
 def _terra_model() -> dict:
