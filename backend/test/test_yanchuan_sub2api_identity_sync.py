@@ -131,3 +131,25 @@ async def test_two_browser_sessions_for_same_identity_keep_their_own_key(monkeyp
             'https://api.yan-chuan.com/v1/chat/completions', 'admin-key', user, request=SimpleNamespace(cookies={}, state=SimpleNamespace())
         )
     assert missing_cookie.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_key_login_session_storage_returns_the_saved_session(monkeypatch):
+    saved = SimpleNamespace(id='credential-session')
+
+    async def create_session(user_id, provider, token, db=None):
+        assert user_id == 'local-user'
+        assert provider == auths_router.SUB2API_KEY_SESSION_PROVIDER
+        assert token['access_token'] == 'key-a'
+        return saved
+
+    monkeypatch.setattr(auths_router.OAuthSessions, 'create_session', create_session)
+    result = await auths_router.store_sub2api_key_session(
+        'local-user',
+        instance_id='yan-chuan',
+        subject='42',
+        observed_key={'id': '1', 'name': 'Key A'},
+        api_key='key-a',
+        db=object(),
+    )
+    assert result is saved

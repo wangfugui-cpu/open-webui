@@ -1080,6 +1080,7 @@ async def store_sub2api_key_session(
     saved = await OAuthSessions.create_session(user_id, SUB2API_KEY_SESSION_PROVIDER, token, db=db)
     if not saved:
         raise HTTPException(500, detail='Unable to save Sub2API credentials')
+    return saved
 
 
 @router.post('/sub2api/signin', response_model=SessionUserResponse)
