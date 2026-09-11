@@ -1557,6 +1557,14 @@ async def generate_chat_completion(
 
     model_id = form_data.get('model')
     model_info = await Models.get_model_by_id(model_id)
+    models = await get_openai_models_by_id(request, user)
+    model = models.get(model_id)
+
+    if not model:
+        raise HTTPException(
+            status_code=404,
+            detail=ERROR_MESSAGES.MODEL_NOT_FOUND(),
+        )
 
     # Check model info and override the payload
     if model_info:
@@ -1578,18 +1586,11 @@ async def generate_chat_completion(
 
         await check_model_access(user, model_info, bypass_filter)
     else:
-        await check_model_access(user, None, bypass_filter)
+        model_url, _, _ = await get_openai_connection(model['urlIdx'])
+        if not (is_sub2api_key_login_user(user) and is_sub2api_key_login_connection(model_url)):
+            await check_model_access(user, None, bypass_filter)
 
-    models = await get_openai_models_by_id(request, user)
-    model = models.get(model_id)
-
-    if model:
-        idx = model['urlIdx']
-    else:
-        raise HTTPException(
-            status_code=404,
-            detail=ERROR_MESSAGES.MODEL_NOT_FOUND(),
-        )
+    idx = model['urlIdx']
 
     url, key, api_config = await get_openai_connection(idx)
 
