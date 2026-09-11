@@ -101,13 +101,23 @@ export class SocketIOCollaborationProvider {
 
 		if (typeof this.initialContent === 'string') {
 			this.editor.commands.setContent(this.initialContent);
-			this.clearUndoHistory();
+			this.clearInitialUndoHistoryAfterSync();
 			return;
 		}
 
 		const doc = prosemirrorJSONToYDoc(this.editor.schema, this.initialContent);
 		Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(doc), INITIAL_CONTENT_ORIGIN);
+		this.clearInitialUndoHistoryAfterSync();
+	}
+
+	private clearInitialUndoHistoryAfterSync() {
 		this.clearUndoHistory();
+
+		// String hydration enters Yjs through ProseMirror, so its transaction is
+		// scheduled after setContent returns. A follow-up task runs after both
+		// hydration paths have reached the undo manager, without treating the
+		// loaded document as an edit the user can undo.
+		setTimeout(() => this.clearUndoHistory(), 0);
 	}
 
 	private clearUndoHistory() {
