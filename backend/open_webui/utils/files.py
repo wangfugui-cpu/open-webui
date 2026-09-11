@@ -90,6 +90,14 @@ async def get_image_base64_from_url(url: str, user=None) -> Optional[str]:
         else:
             # Non-URL string — treat as file_id. Delegate to the canonical
             # file-ID resolver which enforces ownership/access checks.
+            # Chat history stores local attachments as content URLs.  They
+            # are not valid provider URLs, and passing the whole path as an
+            # ID makes conversion silently fail, leaving a relative URL for
+            # the upstream model to reject.  Reduce only the local file
+            # content route to its durable ID; the resolver below still
+            # performs the user ownership check.
+            if url.startswith('/api/v1/files/') and '/content' in url:
+                url = url.split('/api/v1/files/', 1)[1].split('/content', 1)[0]
             return await get_image_base64_from_file_id(url, user=user)
 
     except Exception:
