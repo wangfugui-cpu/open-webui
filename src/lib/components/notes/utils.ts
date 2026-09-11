@@ -1,4 +1,5 @@
 import DOMPurify from 'dompurify';
+import { saveAs } from 'file-saver';
 import { toast } from 'svelte-sonner';
 
 import { WEBUI_API_BASE_URL } from '$lib/constants';
