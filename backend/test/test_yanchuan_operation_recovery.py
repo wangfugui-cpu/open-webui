@@ -125,6 +125,33 @@ async def test_each_model_lane_is_durably_recorded_before_operation_completion(i
 
 
 @pytest.mark.asyncio
+async def test_operation_keeps_the_credential_reference_that_started_it(isolated_runtime_db):
+    claim = await Operations.acquire(
+        user_id='credential-user',
+        client_key='credential-operation',
+        fingerprint='credential-fingerprint',
+        chat_id='credential-chat',
+        user_message_id='credential-user-message',
+        assistant_message_ids=['credential-assistant'],
+        credential_session_id='browser-key-session-a',
+    )
+    assert claim.owns_launch
+
+    replay = await Operations.acquire(
+        user_id='credential-user',
+        client_key='credential-operation',
+        fingerprint='credential-fingerprint',
+        chat_id='credential-chat',
+        user_message_id='credential-user-message',
+        assistant_message_ids=['credential-assistant'],
+        credential_session_id='browser-key-session-b',
+    )
+
+    assert not replay.owns_launch
+    assert replay.operation.credential_session_id == 'browser-key-session-a'
+
+
+@pytest.mark.asyncio
 async def test_interrupted_upstream_stream_without_a_tool_row_is_durable_unknown_not_retryable(isolated_runtime_db):
     """A native tool call may be in an unfinished stream, before it can be claimed."""
     claim = await Operations.acquire(

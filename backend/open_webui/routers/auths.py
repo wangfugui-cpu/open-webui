@@ -31,6 +31,7 @@ from open_webui.env import (
     OAUTH_TOKEN_EXCHANGE_RATE_LIMIT_WINDOW,
     OAUTH_TOKEN_EXCHANGE_TRUSTED_CLIENT_IDS,
     SUB2API_KEY_LOGIN_BASE_URL,
+    SUB2API_KEY_LOGIN_INSTANCE_ID,
     WEBUI_AUTH,
     WEBUI_AUTH_COOKIE_SAME_SITE,
     WEBUI_AUTH_COOKIE_SECURE,
@@ -251,7 +252,6 @@ class SessionUserInfoResponse(SessionUserResponse, UserStatus):
 
 class Sub2APIKeySigninForm(BaseModel):
     api_key: str
-    display_name: str | None = None
 
 
 @router.get('/', response_model=SessionUserInfoResponse)
@@ -842,11 +842,31 @@ async def signin(
 
 
 SUB2API_KEY_SESSION_PROVIDER = 'sub2api_api_key'
+SUB2API_KEY_SESSION_COOKIE = 'sub2api_key_session_id'
 SUB2API_KEY_SESSION_LIFETIME_SECONDS = 10 * 365 * 24 * 60 * 60
 SUB2API_OAUTH_METADATA_KEY = 'sub2api'
 
 
-async def fetch_sub2api_identity(api_key: str) -> tuple[str, str]:
+def get_sub2api_instance_id() -> str:
+    """Return the server-owned namespace for this trusted gateway."""
+    if SUB2API_KEY_LOGIN_INSTANCE_ID:
+        return SUB2API_KEY_LOGIN_INSTANCE_ID[:128]
+    # This compatibility default is still derived solely from server config,
+    # not a value supplied by the browser.
+    fingerprint = hashlib.sha256(SUB2API_KEY_LOGIN_BASE_URL.encode()).hexdigest()[:24]
+    return f'sub2api:{fingerprint}'
+
+
+def get_sub2api_user_email(instance_id: str, subject: str) -> str:
+    digest = hashlib.sha256(f'{instance_id}\0{subject}'.encode()).hexdigest()[:32]
+    return f'sub2api-user-{digest}@users.invalid'
+
+
+def get_legacy_sub2api_user_email(subject: str) -> str:
+    return f'sub2api-user-{subject}@users.invalid'
+
+
+async def fetch_sub2api_identity(api_key: str) -> tuple[str, str, dict[str, str | None]]:
     """Validate an API key server-side and return its stable Sub2API identity."""
     if not SUB2API_KEY_LOGIN_BASE_URL:
         raise HTTPException(status_code=503, detail='言川访问密钥登录暂未配置')
@@ -889,7 +909,18 @@ async def fetch_sub2api_identity(api_key: str) -> tuple[str, str]:
 
     raw_name = identity.get('name') if isinstance(identity, dict) else None
     name = str(raw_name).strip()[:100] if raw_name is not None else ''
-    return user_id, name or f'言川用户 {user_id}'
+    raw_key = payload.get('key') if isinstance(payload, dict) else None
+    raw_key_id = raw_key.get('id') if isinstance(raw_key, dict) else None
+    key_id = str(raw_key_id).strip() if raw_key_id is not None else None
+    if key_id and not re.fullmatch(r'\d{1,19}', key_id):
+        log.warning('Sub2API identity verification returned an invalid key identifier')
+        raise HTTPException(status_code=503, detail='言川访问密钥验证服务暂不可用，请稍后重试')
+    raw_key_name = raw_key.get('name') if isinstance(raw_key, dict) else None
+    key_name = str(raw_key_name).strip()[:100] if raw_key_name is not None else ''
+    return user_id, name or f'言川用户 {user_id}', {
+        'id': key_id,
+        'name': key_name or (f'访问密钥 {key_id}' if key_id else '已验证的访问密钥'),
+    }
 
 
 async def create_sub2api_key_user(
@@ -898,6 +929,8 @@ async def create_sub2api_key_user(
     email: str,
     name: str,
     subject: str,
+    instance_id: str,
+    observed_key: dict[str, str | None],
     db: AsyncSession,
 ) -> UserModel:
     """Create a regular account for a verified Sub2API identity.
@@ -914,7 +947,16 @@ async def create_sub2api_key_user(
         # during first-run setup; applying that default here would grant a
         # verified-but-unprivileged Sub2API key cross-account access.
         role='user',
-        oauth={SUB2API_OAUTH_METADATA_KEY: {'subject': subject}},
+        oauth={
+            SUB2API_OAUTH_METADATA_KEY: {
+                'instance_id': instance_id,
+                'stable_user_id': subject,
+                # subject is retained for installations upgraded from the
+                # earlier personal-key contract.
+                'subject': subject,
+                'observed_keys': [observed_key] if observed_key.get('id') else [],
+            }
+        },
         db=db,
     )
     if not user:
@@ -936,22 +978,13 @@ async def create_sub2api_key_user(
     return user
 
 
-def is_sub2api_key_user(user: UserModel, subject: str) -> bool:
+def is_sub2api_key_user(user: UserModel, subject: str, instance_id: str) -> bool:
     metadata = user.oauth.get(SUB2API_OAUTH_METADATA_KEY) if isinstance(user.oauth, dict) else None
-    return isinstance(metadata, dict) and metadata.get('subject') == subject
-
-
-def normalize_sub2api_display_name(value: str | None) -> str | None:
-    """Accept a small, presentation-only name supplied during key sign-in."""
-    if value is None:
-        return None
-
-    display_name = ' '.join(value.split())
-    if not display_name:
-        return None
-    if len(display_name) > 50:
-        raise HTTPException(status_code=400, detail='Display name must be at most 50 characters')
-    return display_name
+    if not isinstance(metadata, dict):
+        return False
+    stored_subject = metadata.get('stable_user_id') or metadata.get('subject')
+    stored_instance = metadata.get('instance_id')
+    return stored_subject == subject and (stored_instance is None or stored_instance == instance_id)
 
 
 async def get_or_create_sub2api_key_user(
@@ -959,11 +992,19 @@ async def get_or_create_sub2api_key_user(
     *,
     email: str,
     provider_name: str,
-    requested_display_name: str | None,
     subject: str,
+    instance_id: str,
+    observed_key: dict[str, str | None],
     db: AsyncSession,
 ) -> UserModel:
     user = await Users.get_user_by_email(email, db=db)
+    # Preserve the account created by the earlier subject-only contract.  A
+    # legacy row is adopted only when its stored subject matches; names and
+    # synthetic emails never decide identity.
+    if not user:
+        legacy = await Users.get_user_by_email(get_legacy_sub2api_user_email(subject), db=db)
+        if legacy and is_sub2api_key_user(legacy, subject, instance_id):
+            user = legacy
     if user:
         return user
 
@@ -971,8 +1012,10 @@ async def get_or_create_sub2api_key_user(
         return await create_sub2api_key_user(
             request,
             email=email,
-            name=requested_display_name or provider_name,
+            name=provider_name,
             subject=subject,
+            instance_id=instance_id,
+            observed_key=observed_key,
             db=db,
         )
     except IntegrityError:
@@ -984,45 +1027,57 @@ async def get_or_create_sub2api_key_user(
         raise
 
 
-async def adopt_sub2api_display_name(
+async def sync_sub2api_identity(
     user: UserModel,
     subject: str,
-    requested_display_name: str | None,
+    instance_id: str,
+    provider_name: str,
+    observed_key: dict[str, str | None],
     db: AsyncSession,
 ) -> UserModel:
-    # A user who signed in before the welcome page had a name field may still
-    # carry the placeholder fallback. Let that one account adopt the requested
-    # name, but never overwrite a real profile name on later sign-ins.
-    legacy_placeholder_name = f'Sub2API User {subject}'
-    yanchuan_placeholder_name = f'言川用户 {subject}'
-    if user.name not in {legacy_placeholder_name, yanchuan_placeholder_name}:
-        return user
+    oauth = dict(user.oauth or {})
+    metadata = dict(oauth.get(SUB2API_OAUTH_METADATA_KEY) or {})
+    observed_keys = [item for item in metadata.get('observed_keys', []) if isinstance(item, dict)]
+    key_id = observed_key.get('id')
+    if key_id:
+        observed_keys = [item for item in observed_keys if item.get('id') != key_id]
+        observed_keys.append({'id': key_id, 'name': observed_key.get('name') or f'访问密钥 {key_id}'})
+    oauth[SUB2API_OAUTH_METADATA_KEY] = {
+        'instance_id': instance_id,
+        'stable_user_id': subject,
+        'subject': subject,
+        # Bound the display-only history. It represents keys observed through
+        # this login integration, not every key held in Sub2API.
+        'observed_keys': observed_keys[-20:],
+    }
+    updated = {'oauth': oauth}
+    if user.name != provider_name:
+        updated['name'] = provider_name
+    return await Users.update_user_by_id(user.id, updated, db=db) or user
 
-    name = requested_display_name or yanchuan_placeholder_name
-    if user.name == name:
-        return user
 
-    return await Users.update_user_by_id(user.id, {'name': name}, db=db) or user
-
-
-async def store_sub2api_key_session(user_id: str, subject: str, api_key: str, db: AsyncSession) -> None:
+async def store_sub2api_key_session(
+    user_id: str,
+    *,
+    instance_id: str,
+    subject: str,
+    observed_key: dict[str, str | None],
+    api_key: str,
+    db: AsyncSession,
+):
     token = {
         'access_token': api_key,
+        'instance_id': instance_id,
         'subject': subject,
+        'key_id': observed_key.get('id'),
         # Sub2API remains the source of truth for expiry and revocation. This
         # value merely avoids generic OAuth cleanup removing the key early.
         'expires_at': int(time.time()) + SUB2API_KEY_SESSION_LIFETIME_SECONDS,
     }
-    existing = await OAuthSessions.get_session_by_provider_and_user_id(
-        SUB2API_KEY_SESSION_PROVIDER,
-        user_id,
-        db=db,
-    )
-    saved = (
-        await OAuthSessions.update_session_by_id(existing.id, token, db=db)
-        if existing
-        else await OAuthSessions.create_session(user_id, SUB2API_KEY_SESSION_PROVIDER, token, db=db)
-    )
+    # A browser session owns one credential reference.  Updating a single
+    # per-user row would make a later Key login silently charge an earlier
+    # browser session to the new Key.
+    saved = await OAuthSessions.create_session(user_id, SUB2API_KEY_SESSION_PROVIDER, token, db=db)
     if not saved:
         raise HTTPException(500, detail='Unable to save Sub2API credentials')
 
@@ -1050,25 +1105,41 @@ async def signin_with_sub2api_key(
     if signin_rate_limiter.is_limited(f'sub2api:{key_fingerprint}'):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=ERROR_MESSAGES.RATE_LIMIT_EXCEEDED)
 
-    requested_display_name = normalize_sub2api_display_name(form_data.display_name)
-    subject, provider_name = await fetch_sub2api_identity(api_key)
-    email = f'sub2api-user-{subject}@users.invalid'
+    instance_id = get_sub2api_instance_id()
+    subject, provider_name, observed_key = await fetch_sub2api_identity(api_key)
+    email = get_sub2api_user_email(instance_id, subject)
     user = await get_or_create_sub2api_key_user(
         request,
         email=email,
         provider_name=provider_name,
-        requested_display_name=requested_display_name,
         subject=subject,
+        instance_id=instance_id,
+        observed_key=observed_key,
         db=db,
     )
-    if not is_sub2api_key_user(user, subject):
+    if not is_sub2api_key_user(user, subject, instance_id):
         # A normal local account must never be converted into an external-key
         # account based on a predictable synthetic email address.
         raise HTTPException(status_code=409, detail='言川账号关联冲突，请联系管理员处理')
 
-    user = await adopt_sub2api_display_name(user, subject, requested_display_name, db)
+    user = await sync_sub2api_identity(user, subject, instance_id, provider_name, observed_key, db)
 
-    await store_sub2api_key_session(user.id, subject, api_key, db)
+    credential_session = await store_sub2api_key_session(
+        user.id,
+        instance_id=instance_id,
+        subject=subject,
+        observed_key=observed_key,
+        api_key=api_key,
+        db=db,
+    )
+    response.set_cookie(
+        key=SUB2API_KEY_SESSION_COOKIE,
+        value=credential_session.id,
+        max_age=SUB2API_KEY_SESSION_LIFETIME_SECONDS,
+        httponly=True,
+        samesite=WEBUI_AUTH_COOKIE_SAME_SITE,
+        secure=WEBUI_AUTH_COOKIE_SECURE,
+    )
     return await create_session_response(request, user, db, response, set_cookie=True, source='sub2api')
 
 

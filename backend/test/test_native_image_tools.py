@@ -1052,19 +1052,24 @@ async def test_sub2api_image_requests_select_the_current_users_key(monkeypatch) 
     monkeypatch.setattr(openai_router, 'is_sub2api_key_login_connection', lambda _url: True)
     monkeypatch.setattr(openai_router, 'is_sub2api_key_login_user', lambda _user: True)
 
-    async def current_user_session(*_args, **_kwargs):
-        return SimpleNamespace(token={'access_token': 'family-user-test-key'})
+    async def current_user_session(session_id, user_id):
+        assert (session_id, user_id) == ('browser-session-a', 'family-user')
+        return SimpleNamespace(
+            provider=openai_router.SUB2API_KEY_SESSION_PROVIDER,
+            token={'access_token': 'family-user-test-key', 'subject': 'family-user'},
+        )
 
     monkeypatch.setattr(
         openai_router.OAuthSessions,
-        'get_session_by_provider_and_user_id',
+        'get_session_by_id_and_user_id',
         current_user_session,
     )
 
     api_key = await openai_router.get_effective_openai_api_key(
         'http://sub2api:8080/v1',
         'admin-key-must-not-be-used',
-        SimpleNamespace(id='family-user'),
+        SimpleNamespace(id='family-user', oauth={'sub2api': {'subject': 'family-user'}}),
+        request=SimpleNamespace(cookies={'sub2api_key_session_id': 'browser-session-a'}, state=SimpleNamespace()),
     )
 
     assert api_key == 'family-user-test-key'

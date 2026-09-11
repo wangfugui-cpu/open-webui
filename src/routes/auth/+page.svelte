@@ -44,7 +44,6 @@
 
 	let ldapUsername = '';
 	let sub2apiApiKey = '';
-	let sub2apiDisplayName = '';
 
 	let submitting = false;
 	let keyOnlyMode = false;
@@ -118,7 +117,7 @@
 
 	const sub2apiKeySignInHandler = async () => {
 		try {
-			const sessionUser = await sub2apiKeyUserSignIn(sub2apiApiKey, sub2apiDisplayName).catch((error) => {
+			const sessionUser = await sub2apiKeyUserSignIn(sub2apiApiKey).catch((error) => {
 				toast.error(`${error}`);
 				return null;
 			});
@@ -127,7 +126,6 @@
 			// Keep the credential only for the form submission; it must not live in
 			// browser storage or survive a navigation.
 			sub2apiApiKey = '';
-			sub2apiDisplayName = '';
 		}
 	};
 
@@ -278,7 +276,6 @@
 					{#if keyOnlyMode}
 						<YanchuanKeyLogin
 							bind:apiKey={sub2apiApiKey}
-							bind:displayName={sub2apiDisplayName}
 							{submitting}
 							on:submit={submitHandler}
 						/>

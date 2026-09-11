@@ -77,6 +77,8 @@ async def test_sub2api_key_login_never_uses_an_administrator_default_role(monkey
         email='sub2api-user-99@users.invalid',
         name='Test User',
         subject='99',
+        instance_id='test-instance',
+        observed_key={'id': '7', 'name': 'Test key'},
         db=None,
     )
 
@@ -314,7 +316,7 @@ async def test_candidate_native_image_chain_reaches_simulated_provider_persists_
     async def fake_get_session():
         return _FakeUpstreamSession(upstream_calls)
 
-    async def fake_get_effective_key(_url, _configured_key, current_user):
+    async def fake_get_effective_key(_url, _configured_key, current_user, **_kwargs):
         routed_key_users.append(current_user.id)
         return f'test-key-for-{current_user.id}'
 
@@ -781,33 +783,39 @@ async def test_candidate_file_acl_uses_real_sqlite_rows_for_two_users(monkeypatc
 @pytest.mark.asyncio
 async def test_candidate_personal_keys_are_distinct_exactly_matched_and_never_fall_back(monkeypatch):
     """Use the production routing function, with only its encrypted-session store simulated."""
-    observed_user_ids = []
+    observed_sessions = []
 
-    async def session_for_user(_provider, user_id):
-        observed_user_ids.append(user_id)
+    async def session_for_user(session_id, user_id):
+        observed_sessions.append((session_id, user_id))
         if user_id == 'family-missing':
             return None
-        return SimpleNamespace(token={'access_token': f'test-key-for-{user_id}'})
+        return SimpleNamespace(
+            provider=openai_router.SUB2API_KEY_SESSION_PROVIDER,
+            token={'access_token': f'test-key-for-{user_id}', 'subject': user_id},
+        )
 
     monkeypatch.setattr(openai_router, 'ENABLE_SUB2API_KEY_LOGIN', True)
     monkeypatch.setattr(openai_router, 'SUB2API_KEY_LOGIN_BASE_URL', 'http://sub2api:8080')
-    monkeypatch.setattr(openai_router.OAuthSessions, 'get_session_by_provider_and_user_id', session_for_user)
+    monkeypatch.setattr(openai_router.OAuthSessions, 'get_session_by_id_and_user_id', session_for_user)
 
     alice = _user('family-a', oauth={'sub2api': {'subject': 'family-a'}})
     bob = _user('family-b', oauth={'sub2api': {'subject': 'family-b'}})
     missing = _user('family-missing', oauth={'sub2api': {'subject': 'family-missing'}})
 
     assert await openai_router.get_effective_openai_api_key(
-        'http://sub2api:8080/v1', 'configured-service-key', alice
+        'http://sub2api:8080/v1', 'configured-service-key', alice,
+        request=SimpleNamespace(cookies={'sub2api_key_session_id': 'alice-a'}, state=SimpleNamespace()),
     ) == 'test-key-for-family-a'
     assert await openai_router.get_effective_openai_api_key(
-        'http://sub2api:8080/v1', 'configured-service-key', bob
+        'http://sub2api:8080/v1', 'configured-service-key', bob,
+        request=SimpleNamespace(cookies={'sub2api_key_session_id': 'bob-a'}, state=SimpleNamespace()),
     ) == 'test-key-for-family-b'
     # Runtime calls carry a concrete child endpoint rather than the provider
     # base URL. They must retain the same member key without matching another
     # provider or a lookalike path.
     assert await openai_router.get_effective_openai_api_key(
-        'http://sub2api:8080/v1/chat/completions', 'configured-service-key', alice
+        'http://sub2api:8080/v1/chat/completions', 'configured-service-key', alice,
+        request=SimpleNamespace(cookies={'sub2api_key_session_id': 'alice-a'}, state=SimpleNamespace()),
     ) == 'test-key-for-family-a'
     assert openai_router.is_sub2api_key_login_connection('http://sub2api:8080/v1/models') is True
     assert openai_router.is_sub2api_key_login_connection('http://sub2api:8080/v1-not-a-match/models') is False
@@ -816,9 +824,14 @@ async def test_candidate_personal_keys_are_distinct_exactly_matched_and_never_fa
     assert await openai_router.get_effective_openai_api_key(
         'http://other-provider:8080/v1', 'other-provider-key', alice
     ) == 'other-provider-key'
-    assert observed_user_ids == ['family-a', 'family-b', 'family-a']
+    assert observed_sessions == [('alice-a', 'family-a'), ('bob-a', 'family-b'), ('alice-a', 'family-a')]
 
     with pytest.raises(HTTPException) as expired:
-        await openai_router.get_effective_openai_api_key('http://sub2api:8080/v1', 'configured-service-key', missing)
+        await openai_router.get_effective_openai_api_key(
+            'http://sub2api:8080/v1', 'configured-service-key', missing,
+            request=SimpleNamespace(cookies={'sub2api_key_session_id': 'missing-a'}, state=SimpleNamespace()),
+        )
     assert expired.value.status_code == 401
-    assert observed_user_ids == ['family-a', 'family-b', 'family-a', 'family-missing']
+    assert observed_sessions == [
+        ('alice-a', 'family-a'), ('bob-a', 'family-b'), ('alice-a', 'family-a'), ('missing-a', 'family-missing')
+    ]

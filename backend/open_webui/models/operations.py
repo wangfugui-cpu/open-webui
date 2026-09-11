@@ -35,6 +35,7 @@ class ChatOperation(Base):
     user_id = Column(String, nullable=False, index=True)
     client_key = Column(String, nullable=False)
     request_fingerprint = Column(String, nullable=False)
+    credential_session_id = Column(String, nullable=True)
     chat_id = Column(String, nullable=False, index=True)
     user_message_id = Column(String, nullable=True)
     assistant_message_ids = Column(JSON, nullable=False, default=list)
@@ -251,6 +252,7 @@ class OperationsTable:
         user_message_id: str | None,
         assistant_message_ids: list[str],
         lease_seconds: int = 120,
+        credential_session_id: str | None = None,
     ) -> OperationClaim:
         now = _now()
         owner = str(uuid.uuid4())
@@ -259,6 +261,7 @@ class OperationsTable:
             user_id=user_id,
             client_key=client_key,
             request_fingerprint=fingerprint,
+            credential_session_id=credential_session_id,
             chat_id=chat_id,
             user_message_id=user_message_id,
             assistant_message_ids=assistant_message_ids,

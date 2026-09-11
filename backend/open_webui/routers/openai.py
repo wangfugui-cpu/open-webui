@@ -82,6 +82,7 @@ _MODEL_LIST_TIMEOUT = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_L
 _UNSUPPORTED_OPENAI_MODEL_KEYWORDS = ('babbage', 'dall-e', 'davinci', 'embedding', 'tts', 'whisper')
 BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
 SUB2API_KEY_SESSION_PROVIDER = 'sub2api_api_key'
+SUB2API_KEY_SESSION_COOKIE = 'sub2api_key_session_id'
 SUB2API_OAUTH_METADATA_KEY = 'sub2api'
 
 
@@ -166,7 +167,7 @@ async def get_headers_and_cookies(
     metadata: dict | None = None,
     user: UserModel = None,
 ):
-    key = await get_effective_openai_api_key(url, key, user)
+    key = await get_effective_openai_api_key(url, key, user, request=request)
     cookies = {}
     headers = {
         'Content-Type': 'application/json',
@@ -259,17 +260,49 @@ def is_sub2api_key_login_user(user: UserModel | None) -> bool:
     return isinstance(metadata, dict) and isinstance(metadata.get('subject'), str)
 
 
-async def get_effective_openai_api_key(url: str, configured_key: str | None, user: UserModel | None) -> str | None:
-    """Select an encrypted per-user Sub2API credential for its exact provider URL."""
+async def get_sub2api_key_session_id(request: Request | None, user: UserModel | None) -> str | None:
+    """Resolve the credential reference fixed when this browser operation began."""
+    if request is None or user is None:
+        return None
+    operation_session_id = getattr(request.state, 'sub2api_key_session_id', None)
+    if isinstance(operation_session_id, str) and operation_session_id:
+        return operation_session_id
+    session_id = request.cookies.get(SUB2API_KEY_SESSION_COOKIE)
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+async def get_effective_openai_api_key(
+    url: str,
+    configured_key: str | None,
+    user: UserModel | None,
+    *,
+    request: Request | None = None,
+) -> str | None:
+    """Select only the exact, encrypted Sub2API credential bound to this session."""
     if not is_sub2api_key_login_connection(url) or not is_sub2api_key_login_user(user):
         return configured_key
 
-    session = await OAuthSessions.get_session_by_provider_and_user_id(SUB2API_KEY_SESSION_PROVIDER, user.id)
+    session_id = await get_sub2api_key_session_id(request, user)
+    session = (
+        await OAuthSessions.get_session_by_id_and_user_id(session_id, user.id)
+        if session_id
+        else None
+    )
+    if not session or session.provider != SUB2API_KEY_SESSION_PROVIDER:
+        raise HTTPException(status_code=401, detail='Your Sub2API key connection has expired. Please sign in again.')
     token = session.token if session else None
     api_key = token.get('access_token') if isinstance(token, dict) else None
-    if not isinstance(api_key, str) or not api_key:
+    metadata = user.oauth.get(SUB2API_OAUTH_METADATA_KEY) if isinstance(user.oauth, dict) else None
+    subject = metadata.get('stable_user_id') or metadata.get('subject') if isinstance(metadata, dict) else None
+    if (
+        not isinstance(api_key, str)
+        or not api_key
+        or not isinstance(token, dict)
+        or token.get('subject') != subject
+    ):
         # Do not silently fall back to the service-wide key: that would charge
-        # the administrator's account when a member's credential is missing.
+        # the administrator's account or a later Key login when a member's
+        # credential is missing.
         raise HTTPException(status_code=401, detail='Your Sub2API key connection has expired. Please sign in again.')
     return api_key
 

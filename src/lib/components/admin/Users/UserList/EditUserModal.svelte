@@ -184,7 +184,21 @@
 										</div>
 									</div>
 
-									{#if _user?.oauth}
+									{#if _user?.oauth?.sub2api}
+										<div class="flex flex-col w-full">
+											<div class="mb-1 text-xs text-gray-500">言川账号关联</div>
+											<div class="text-sm break-all mb-1 flex flex-col space-y-1">
+												<div><span class="text-gray-500">用户标识 </span>{_user.oauth.sub2api.stable_user_id ?? _user.oauth.sub2api.subject}</div>
+												<div><span class="text-gray-500">实例 </span>{_user.oauth.sub2api.instance_id ?? '旧关联（待下次登录补齐）'}</div>
+												{#if (_user.oauth.sub2api.observed_keys ?? []).length > 0}
+													<div class="text-gray-500">已观察到的访问密钥</div>
+													{#each _user.oauth.sub2api.observed_keys as key}
+														<div>{key.name ?? '未命名'} <span class="text-gray-500">#{key.id}</span></div>
+													{/each}
+												{/if}
+											</div>
+										</div>
+									{:else if _user?.oauth}
 										<div class="flex flex-col w-full">
 											<div class=" mb-1 text-xs text-gray-500">{$i18n.t('OAuth ID')}</div>
 

@@ -852,6 +852,9 @@ ENABLE_OPENAI_API_PASSTHROUGH = os.getenv('ENABLE_OPENAI_API_PASSTHROUGH', 'Fals
 # and stores it encrypted for subsequent per-user model requests.
 ENABLE_SUB2API_KEY_LOGIN = os.getenv('ENABLE_SUB2API_KEY_LOGIN', 'False').lower() == 'true'
 SUB2API_KEY_LOGIN_BASE_URL = os.getenv('SUB2API_KEY_LOGIN_BASE_URL', '').rstrip('/')
+# A server-owned namespace for external subjects.  It must be stable for a
+# given trusted Sub2API deployment; clients never supply or select it.
+SUB2API_KEY_LOGIN_INSTANCE_ID = os.getenv('SUB2API_KEY_LOGIN_INSTANCE_ID', '').strip()
 
 WEBUI_AUTH_SIGNOUT_REDIRECT_URL = os.getenv('WEBUI_AUTH_SIGNOUT_REDIRECT_URL', None)
 

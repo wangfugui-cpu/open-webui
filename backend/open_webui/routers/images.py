@@ -636,6 +636,7 @@ async def image_generations(
                 image_config.IMAGES_OPENAI_API_BASE_URL,
                 image_config.IMAGES_OPENAI_API_KEY,
                 user,
+                request=request,
             )
             headers = {
                 'Authorization': f'Bearer {api_key}',
@@ -1013,6 +1014,7 @@ async def image_edits(
                 image_config.IMAGES_EDIT_OPENAI_API_BASE_URL,
                 image_config.IMAGES_EDIT_OPENAI_API_KEY,
                 user,
+                request=request,
             )
             headers = {
                 'Authorization': f'Bearer {api_key}',

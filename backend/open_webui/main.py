@@ -1310,6 +1310,7 @@ async def chat_completion(
             # A new chat receives its durable id before any chat or task write.
             # Replays deliberately fingerprint the new-chat intent, not this generated id.
             assigned_chat_id = chat_id or (str(uuid4()) if is_new_chat else chat_id)
+            credential_session_id = await openai.get_sub2api_key_session_id(request, user)
             operation_claim = await Operations.acquire(
                 user_id=user.id,
                 client_key=operation_key,
@@ -1326,6 +1327,7 @@ async def chat_completion(
                         'tool_servers': form_data.get('tool_servers'),
                     },
                 ),
+                credential_session_id=credential_session_id,
                 chat_id=assigned_chat_id,
                 user_message_id=user_message.get('id') if user_message else None,
                 assistant_message_ids=[
@@ -1349,6 +1351,8 @@ async def chat_completion(
                 operation = await Operations.recover_delivery(operation.id) or operation
                 return operation_response(operation)
             chat_id = operation_claim.operation.chat_id
+            if operation_claim.operation.credential_session_id:
+                request.state.sub2api_key_session_id = operation_claim.operation.credential_session_id
 
         # Drop tool_servers if caller lacks features.direct_tool_servers —
         # mirrors the storage-side strip in user/settings/update.

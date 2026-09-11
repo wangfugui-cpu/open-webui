@@ -7,7 +7,6 @@
 	import YanchuanInstallGuide from '$lib/components/auth/YanchuanInstallGuide.svelte';
 
 	export let apiKey = '';
-	export let displayName = '';
 	export let submitting = false;
 
 	const dispatch = createEventDispatcher<{ submit: void }>();
@@ -69,23 +68,9 @@
 	<section class="order-1 w-full max-w-md justify-self-center rounded-[2rem] border border-slate-200 bg-white p-6 sm:p-9 shadow-xl shadow-slate-900/5 dark:border-white/10 dark:bg-slate-950 dark:shadow-none lg:order-2">
 		<div class="mb-7">
 			<p class="text-2xl font-semibold tracking-tight text-slate-950 dark:text-white">进入言川 AI</p>
-			<p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">输入自己的言川访问密钥即可使用。首次登录可以留下一个家人容易识别的名称。</p>
+			<p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">输入自己的言川访问密钥即可使用。显示名称会与言川账号自动同步。</p>
 		</div>
 		<form class="flex flex-col" on:submit={submit}>
-			<div class="mb-5">
-				<label for="sub2api-display-name" class="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-200">
-					显示名称 <span class="font-normal text-slate-400">（首次登录可填）</span>
-				</label>
-				<input
-					bind:value={displayName}
-					type="text"
-					id="sub2api-display-name"
-					class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 outline-hidden transition placeholder:text-slate-400 focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10 dark:border-white/10 dark:bg-white/5 dark:text-white"
-					autocomplete="nickname"
-					maxlength="50"
-					placeholder="例如：妈妈、小川"
-				/>
-			</div>
 			<div>
 				<label for="sub2api-api-key" class="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-200">言川访问密钥</label>
 				<SensitiveInput
