@@ -294,11 +294,13 @@ async def get_effective_openai_api_key(
     api_key = token.get('access_token') if isinstance(token, dict) else None
     metadata = user.oauth.get(SUB2API_OAUTH_METADATA_KEY) if isinstance(user.oauth, dict) else None
     subject = metadata.get('stable_user_id') or metadata.get('subject') if isinstance(metadata, dict) else None
+    instance_id = metadata.get('instance_id') if isinstance(metadata, dict) else None
     if (
         not isinstance(api_key, str)
         or not api_key
         or not isinstance(token, dict)
         or token.get('subject') != subject
+        or token.get('instance_id') != instance_id
     ):
         # Do not silently fall back to the service-wide key: that would charge
         # the administrator's account or a later Key login when a member's

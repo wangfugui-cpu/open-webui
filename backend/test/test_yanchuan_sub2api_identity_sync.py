@@ -111,6 +111,21 @@ async def test_two_browser_sessions_for_same_identity_keep_their_own_key(monkeyp
         'https://api.yan-chuan.com/v1/chat/completions', 'admin-key', user, request=request_b
     ) == 'key-b'
 
+    sessions['wrong-instance'] = SimpleNamespace(
+        provider=openai_router.SUB2API_KEY_SESSION_PROVIDER,
+        token={'access_token': 'wrong-key', 'subject': '42', 'instance_id': 'another-instance'},
+    )
+    with pytest.raises(HTTPException) as mismatched_instance:
+        await openai_router.get_effective_openai_api_key(
+            'https://api.yan-chuan.com/v1/chat/completions',
+            'admin-key',
+            user,
+            request=SimpleNamespace(
+                cookies={'sub2api_key_session_id': 'wrong-instance'}, state=SimpleNamespace()
+            ),
+        )
+    assert mismatched_instance.value.status_code == 401
+
     with pytest.raises(HTTPException) as missing_cookie:
         await openai_router.get_effective_openai_api_key(
             'https://api.yan-chuan.com/v1/chat/completions', 'admin-key', user, request=SimpleNamespace(cookies={}, state=SimpleNamespace())
