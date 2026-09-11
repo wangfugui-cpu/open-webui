@@ -4957,6 +4957,12 @@ async def streaming_chat_response_handler(response, ctx):
                     nonlocal last_response_id
 
                     response_tool_calls = []
+                    # A clean TCP/SSE EOF is not a model completion. Some
+                    # gateways can close a stream after an HTTP 200 without
+                    # forwarding a terminal event; treating that as success
+                    # made the durable operation COMPLETE while the assistant
+                    # placeholder remained unfinished.
+                    provider_terminal_observed = False
 
                     delta_count = 0
                     delta_chunk_size = max(
@@ -5145,6 +5151,10 @@ async def streaming_chat_response_handler(response, ctx):
                         if data:
                             last_semantic_event_at = time.monotonic()
 
+                        if data == '[DONE]':
+                            provider_terminal_observed = True
+                            continue
+
                         try:
                             data = JSONCodec.loads(data)
 
@@ -5182,6 +5192,13 @@ async def streaming_chat_response_handler(response, ctx):
                                 # Check for Responses API events (type field starts with "response.")
                                 elif data.get('type', '').startswith('response.'):
                                     response_data_type = data.get('type', '')
+                                    if response_data_type in {
+                                        'response.completed',
+                                        'response.failed',
+                                        'response.cancelled',
+                                        'response.incomplete',
+                                    }:
+                                        provider_terminal_observed = True
                                     response_data_is_delta = response_data_type.endswith('.delta')
                                     output, response_metadata = handle_responses_streaming_event(data, output)
 
@@ -5300,6 +5317,8 @@ async def streaming_chat_response_handler(response, ctx):
 
                                     delta = choices[0].get('delta', {})
                                     delta_type = 'content'
+                                    if choices[0].get('finish_reason') is not None:
+                                        provider_terminal_observed = True
 
                                     # Handle delta annotations
                                     annotations = delta.get('annotations')
@@ -5757,12 +5776,14 @@ async def streaming_chat_response_handler(response, ctx):
                         except (asyncio.CancelledError, KeyboardInterrupt):
                             raise
                         except Exception as e:
-                            done = 'data: [DONE]' in line
-                            if done:
-                                pass
-                            else:
-                                log.debug('Error: %s', e)
-                                continue
+                            # A malformed provider data frame is not harmless:
+                            # it can contain a partial native tool command.
+                            # Let the durable-operation boundary mark it
+                            # UNKNOWN instead of silently declaring success.
+                            raise RuntimeError('Unable to parse the upstream stream response.') from e
+
+                    if not provider_terminal_observed:
+                        raise RuntimeError('Upstream stream ended without a terminal completion event.')
                     await flush_pending_delta_data()
 
                     if output:

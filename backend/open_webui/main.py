@@ -296,6 +296,60 @@ async def emit_chat_list_event(metadata: dict, chat_id: str):
         await event_emitter({'type': 'chat:list', 'data': {'chat_id': chat_id, 'folder_id': folder_id}})
 
 
+def _has_delivered_assistant_result(message: dict | None) -> bool:
+    """Whether a persisted assistant message contains an actual user result.
+
+    ``done`` alone only means a code path wrote a terminal flag. A completed
+    operation must also have text, a delivered file, or a completed tool
+    result. In-progress tool calls and an empty placeholder are never a
+    deliverable answer.
+    """
+    if not message or message.get('done') is not True or message.get('error'):
+        return False
+
+    content = message.get('content')
+    if isinstance(content, str) and content.strip():
+        return True
+    if message.get('files'):
+        return True
+
+    for item in message.get('output') or []:
+        if item.get('files'):
+            return True
+        if item.get('type') == 'message':
+            for part in item.get('content') or []:
+                if isinstance(part, dict) and str(part.get('text') or '').strip():
+                    return True
+        if item.get('type') == 'function_call_output' and item.get('status') == 'completed':
+            for part in item.get('output') or []:
+                if isinstance(part, dict) and str(part.get('text') or '').strip():
+                    return True
+    return False
+
+
+async def _assert_persisted_chat_delivery(metadata: dict) -> None:
+    """Reject a task that returned before it produced a durable assistant result."""
+    chat_id = metadata.get('chat_id')
+    message_id = metadata.get('message_id')
+    if not (is_saved_chat_id(chat_id) and message_id):
+        return
+
+    message = await Chats.get_message_by_id_and_message_id(chat_id, message_id)
+    if message and message.get('error'):
+        raise RuntimeError(str(message['error'].get('content') or 'The model response failed.'))
+    if _has_delivered_assistant_result(message):
+        return
+
+    # The provider was already contacted but no durable result exists. A
+    # replay must expose confirmation-required state, not send another paid
+    # request or mark an empty assistant placeholder as completed.
+    metadata['operation_result_unknown'] = {
+        'code': 'assistant_delivery_unconfirmed',
+        'message': 'The upstream response ended without a durable assistant result; confirmation is required.',
+    }
+    raise RuntimeError(metadata['operation_result_unknown']['message'])
+
+
 class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
         try:
@@ -1740,6 +1794,7 @@ async def chat_completion(
                     pass
                 if result.background is not None:
                     await result.background()
+            await _assert_persisted_chat_delivery(metadata)
             succeeded = True
             return result
         except asyncio.CancelledError:

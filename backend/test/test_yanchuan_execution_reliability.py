@@ -566,6 +566,12 @@ async def test_post_response_helpers_do_not_keep_the_primary_chat_task_or_operat
     helper_started = asyncio.Event()
     release_helper = asyncio.Event()
 
+    async def completed_text_stream(_request, _form_data, _user):
+        harness.chat_upstream_calls.append({'phase': 'initial-text'})
+        return _text_stream('已完成')
+
+    monkeypatch.setattr(main, 'chat_completion_handler', completed_text_stream)
+
     async def hanging_helper(_ctx):
         helper_started.set()
         await release_helper.wait()
@@ -658,6 +664,139 @@ async def test_interrupted_native_tool_stream_becomes_unknown_without_starting_a
     assert replay['operation_status'] == OPERATION_UNKNOWN
     assert len(harness.created_tasks) == 1
     assert len(harness.chat_upstream_calls) == 1
+    assert harness.image_upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_empty_stream_cannot_complete_an_empty_assistant_placeholder(
+    isolated_runtime_db, tmp_path, monkeypatch
+):
+    """A 200 + [DONE] without a response must not become a completed operation."""
+    from open_webui.models.operations import ChatOperation, OPERATION_UNKNOWN
+
+    harness = _EntryHarness(isolated_runtime_db, tmp_path, monkeypatch)
+    chat_id = 'terminal-empty-stream-chat'
+    await _create_empty_chat(chat_id, harness.user, harness.model)
+
+    async def terminal_empty_stream(_request, _form_data, _user):
+        harness.chat_upstream_calls.append({'phase': 'initial-empty-terminal'})
+
+        async def body():
+            yield b'data: [DONE]\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    monkeypatch.setattr(main, 'chat_completion_handler', terminal_empty_stream)
+    response = await harness.submit(
+        _payload(
+            harness.model,
+            chat_id=chat_id,
+            user_message_id='terminal-empty-stream-user',
+            assistant_message_id='terminal-empty-stream-assistant',
+            content='请编辑这张图片',
+        ),
+        headers={'Idempotency-Key': 'terminal-empty-stream-operation'},
+    )
+    await harness.wait_for_tasks()
+
+    async with AsyncSession(isolated_runtime_db) as session:
+        operation = await session.get(ChatOperation, response['operation_id'])
+        assert operation is not None
+        assert operation.status == OPERATION_UNKNOWN
+        assert operation.result['code'] == 'operation_result_unknown'
+
+    assistant = await Chats.get_message_by_id_and_message_id(chat_id, 'terminal-empty-stream-assistant')
+    assert assistant is not None
+    assert assistant.get('error')
+    assert assistant.get('content', '') == ''
+    assert harness.image_upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_stream_without_terminal_event_becomes_unknown_even_after_text_delta(
+    isolated_runtime_db, tmp_path, monkeypatch
+):
+    """A partial visible delta is not a confirmed finished model response."""
+    from open_webui.models.operations import ChatOperation, OPERATION_UNKNOWN
+
+    harness = _EntryHarness(isolated_runtime_db, tmp_path, monkeypatch)
+    chat_id = 'missing-terminal-stream-chat'
+    await _create_empty_chat(chat_id, harness.user, harness.model)
+
+    async def missing_terminal_stream(_request, _form_data, _user):
+        harness.chat_upstream_calls.append({'phase': 'initial-missing-terminal'})
+
+        async def body():
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    monkeypatch.setattr(main, 'chat_completion_handler', missing_terminal_stream)
+    response = await harness.submit(
+        _payload(
+            harness.model,
+            chat_id=chat_id,
+            user_message_id='missing-terminal-stream-user',
+            assistant_message_id='missing-terminal-stream-assistant',
+            content='请说明结果',
+        ),
+        headers={'Idempotency-Key': 'missing-terminal-stream-operation'},
+    )
+    await harness.wait_for_tasks()
+
+    async with AsyncSession(isolated_runtime_db) as session:
+        operation = await session.get(ChatOperation, response['operation_id'])
+        assert operation is not None
+        assert operation.status == OPERATION_UNKNOWN
+        assert operation.result['code'] == 'operation_result_unknown'
+
+    assistant = await Chats.get_message_by_id_and_message_id(chat_id, 'missing-terminal-stream-assistant')
+    assert assistant is not None
+    assert assistant.get('error')
+    assert harness.image_upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_upstream_tool_frame_becomes_unknown_without_executing_it(
+    isolated_runtime_db, tmp_path, monkeypatch
+):
+    """A parser failure cannot silently drop a native tool command and complete."""
+    from open_webui.models.operations import ChatOperation, OPERATION_UNKNOWN
+
+    harness = _EntryHarness(isolated_runtime_db, tmp_path, monkeypatch)
+    chat_id = 'malformed-tool-frame-chat'
+    await _create_empty_chat(chat_id, harness.user, harness.model)
+
+    async def malformed_tool_stream(_request, _form_data, _user):
+        harness.chat_upstream_calls.append({'phase': 'initial-malformed-tool-frame'})
+
+        async def body():
+            yield b'data: {"choices":[{"delta":{"tool_calls":[\n\n'
+
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    monkeypatch.setattr(main, 'chat_completion_handler', malformed_tool_stream)
+    response = await harness.submit(
+        _payload(
+            harness.model,
+            chat_id=chat_id,
+            user_message_id='malformed-tool-frame-user',
+            assistant_message_id='malformed-tool-frame-assistant',
+            content='只改杯子颜色',
+        ),
+        headers={'Idempotency-Key': 'malformed-tool-frame-operation'},
+    )
+    await harness.wait_for_tasks()
+
+    async with AsyncSession(isolated_runtime_db) as session:
+        operation = await session.get(ChatOperation, response['operation_id'])
+        assert operation is not None
+        assert operation.status == OPERATION_UNKNOWN
+        assert operation.result['code'] == 'operation_result_unknown'
+
+    assistant = await Chats.get_message_by_id_and_message_id(chat_id, 'malformed-tool-frame-assistant')
+    assert assistant is not None
+    assert assistant.get('error')
     assert harness.image_upstream_calls == []
 
 
